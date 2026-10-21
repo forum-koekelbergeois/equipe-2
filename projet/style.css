@@ -29,6 +29,189 @@ body {
   background: #e84a4a;
 }
 
+/* Page d'accueil : par-dessus le jeu, avec le bouton Jouer au milieu */
+#accueil {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(#150a28 0%, #2e1840 75%, #3a2414 75%, #2b1a10 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+#accueil h2 {
+  font-size: 48px;
+  color: #ff4040;
+  margin: 0 0 20px 0;
+}
+
+.ecran {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+#accueil button, #menu {
+  background: #d32f2f;
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+#accueil button:hover, #menu:hover {
+  background: #e84a4a;
+}
+
+.gros {
+  font-size: 30px;
+  padding: 15px 50px;
+}
+
+.moyen {
+  font-size: 20px;
+  padding: 8px 30px;
+}
+
+.pieces {
+  color: #ffd400;
+  font-size: 20px;
+  margin: 0;
+}
+
+#accueil label {
+  font-size: 20px;
+}
+
+/* Décorations du lobby */
+.deco {
+  position: absolute;
+  font-size: 36px;
+  pointer-events: none;
+}
+
+/* Message de fin de niveau */
+#victoire, #pause {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.8);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+#victoire {
+  background: rgba(0, 0, 0, 0.45); /* assez clair pour voir les confettis */
+}
+
+#victoire h2, #pause h2 {
+  font-size: 40px;
+  color: #ffd400;
+  margin: 0;
+}
+
+#victoire p {
+  font-size: 22px;
+  margin: 0;
+}
+
+#victoire button, #pause button, #boutonPause {
+  font-size: 22px;
+  padding: 10px 30px;
+  background: #d32f2f;
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+#victoire button:hover, #pause button:hover, #boutonPause:hover {
+  background: #e84a4a;
+}
+
+/* Bouton pause : en haut à gauche de l'écran de jeu */
+#boutonPause {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  font-size: 16px;
+  padding: 6px 14px;
+}
+
+/* Une tenue de la boutique */
+#listeTenues {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  max-width: 440px;
+}
+
+#listeQuetes {
+  flex-direction: column;
+  gap: 10px;
+  font-size: 16px;
+}
+
+#listeArmes {
+  flex-direction: column;
+  gap: 8px;
+  font-size: 15px;
+}
+
+.ligneArme {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 420px;
+}
+
+#ecranBoutique h2 {
+  font-size: 32px;
+  margin: 0;
+}
+
+.tenue {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 200px;
+  font-size: 15px;
+}
+
+.tenue canvas {
+  border: 2px solid #fff;
+  border-radius: 8px;
+}
+
+.tenue .pastille {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+}
+
+/* Bouton pour retourner au menu quand on perd */
+#menu {
+  position: absolute;
+  left: 50%;
+  top: 68%;
+  transform: translate(-50%, -50%);
+  font-size: 20px;
+  padding: 8px 24px;
+}
+
 canvas {
   border: 4px solid #6b4a2b;
   background: #c98f5a;

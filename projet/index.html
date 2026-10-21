@@ -11,6 +11,57 @@
   <div id="zone">
     <canvas id="jeu" width="500" height="600"></canvas>
     <button id="rejouer" style="display:none">Rejouer</button>
+    <button id="menu" style="display:none">Retourner au menu</button>
+    <button id="boutonPause" style="display:none">⏸ Pause</button>
+    <div id="pause" style="display:none">
+      <h2>Pause</h2>
+      <button id="boutonReprendre">Reprendre</button>
+      <button id="boutonPauseMenu">Retourner au menu</button>
+    </div>
+    <div id="victoire" style="display:none">
+      <h2 id="texteVictoire">Bravo !</h2>
+      <p>Voulez-vous continuer ou aller au lobby ?</p>
+      <button id="boutonContinuer">Continuer au level 2</button>
+      <button id="boutonLobby">Aller au lobby</button>
+    </div>
+    <div id="accueil">
+      <span class="deco" style="left:12px; top:14px">🕯️</span>
+      <span class="deco" style="right:12px; top:14px">🕯️</span>
+      <span class="deco" style="left:20px; bottom:20px">🤖</span>
+      <span class="deco" style="right:20px; bottom:20px">🏆</span>
+      <span class="deco" style="left:50%; top:10px; transform:translateX(-50%)">⭐ ⭐ ⭐</span>
+      <span class="deco" style="left:90px; bottom:24px">🪙</span>
+      <span class="deco" style="right:90px; bottom:24px">🌙</span>
+      <div id="ecranMenu" class="ecran">
+        <h2>Zombie Stop</h2>
+        <button id="jouer" class="gros">Jouer</button>
+        <button id="boutonParametres" class="moyen">Paramètres</button>
+        <button id="boutonBoutique" class="moyen">Boutique</button>
+        <button id="boutonHardcore" class="moyen">Mode hardcore 👻</button>
+        <p class="pieces">Pièces : <span id="piecesMenu">0</span></p>
+      </div>
+      <div id="ecranParametres" class="ecran" style="display:none">
+        <h2>Paramètres</h2>
+        <label>Son <input type="range" id="reglageSon" min="0" max="100" value="100"></label>
+        <label>Luminosité <input type="range" id="reglageLumiere" min="50" max="150" value="100"></label>
+        <button class="retour moyen">Retour</button>
+      </div>
+      <div id="ecranBoutique" class="ecran" style="display:none">
+        <h2>Boutique</h2>
+        <p class="pieces">Pièces : <span id="piecesBoutique">0</span> | 💎 <span id="gemmes">0</span> | 🏆 <span id="trophees">0</span></p>
+        <div>
+          <button id="ongletTenues" class="moyen">Tenues</button>
+          <button id="ongletArmes" class="moyen">Armes</button>
+          <button id="ongletQuetes" class="moyen">Quêtes</button>
+          <button id="echanger" class="moyen">10 🏆 → 1 💎</button>
+        </div>
+        <div id="listeTenues"></div>
+        <div id="listeArmes" style="display:none"></div>
+        <div id="listeQuetes" style="display:none"></div>
+        <button id="tenueDepart" class="moyen">Tenue de départ</button>
+        <button class="retour moyen">Retour</button>
+      </div>
+    </div>
   </div>
   <p id="infos">Vague : 1 | Score : 0 | Vie : 30</p>
   <script src="script.js"></script>

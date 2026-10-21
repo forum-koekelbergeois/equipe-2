@@ -1,5 +1,5 @@
 const canvas = document.getElementById("jeu");
-const ctx = canvas.getContext("2d");
+let ctx = canvas.getContext("2d"); // change un instant pour dessiner les aperçus de la boutique
 const infos = document.getElementById("infos");
 
 const SOL = 560; // ligne du bas où marchent le héros et les zombies
@@ -34,16 +34,38 @@ let zombiesAApparaitre = 0;
 let pause = 0; // petite pause entre deux vagues
 let prochainZombie = 0;
 let finDuJeu = false;
+let enAttente = true; // vrai tant qu'on n'a pas cliqué sur Jouer
+let niveau = 1;       // on passe au niveau suivant après la vague 50
+let victoire = false; // vrai quand le niveau est terminé
+let enPause = false;  // vrai quand on a cliqué sur Pause
+let animNiveau = 0;   // temps restant de l'animation de début de niveau
+let animManoir = 0;   // temps restant de la scène d'entrée dans le manoir (vague 15)
+let animMontee = 0;  // temps restant de l'anneau quand le héros monte de niveau
+let confettis = [];   // confettis de la fin de niveau
+const COULEURS_NIVEAU = ["#ffd400", "#4ac8ff", "#ff6a3d", "#7be04a", "#d46aff"];
+let hardcore = false; // mode hardcore : des fantômes plus forts et plus rapides
+let armeEquipee = null; // arme achetée dans la boutique (null = armes normales)
+let boules = [];      // boules de feu des squelettes
+let bombesFeu = [];   // bombes lancées par les squelettes en feu
+let mevha = null;     // le robot qui aide le héros (arrive à la vague 10)
+const accueil = document.getElementById("accueil");
+const boutonJouer = document.getElementById("jouer");
+const boutonMenu = document.getElementById("menu");
 let touches = {};
 let temps = 0;
 
 // ----- Sons fabriqués avec le navigateur (pas de fichier audio) -----
 let audio = null;
+let sortieSon = null;     // réglage du volume général
+let volumeGeneral = 1;
 
 function initAudio() {
   if (!audio) {
     try {
       audio = new AudioContext();
+      sortieSon = audio.createGain();
+      sortieSon.gain.value = volumeGeneral;
+      sortieSon.connect(audio.destination);
     } catch (e) {}
   }
   if (audio && audio.state === "suspended") audio.resume();
@@ -61,7 +83,7 @@ function note(freq, debut, duree, forme, volume) {
   gain.gain.exponentialRampToValueAtTime(volume, t0 + 0.02);
   gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duree);
   osc.connect(gain);
-  gain.connect(audio.destination);
+  gain.connect(sortieSon);
   osc.start(t0);
   osc.stop(t0 + duree + 0.05);
 }
@@ -83,7 +105,8 @@ const VOIX = {
   heros:  { base: 330, forme: "square",   volume: 0.05 },
   allie:  { base: 260, forme: "triangle", volume: 0.12 },
   zombie: { base: 120, forme: "sawtooth", volume: 0.05 },
-  boss:   { base: 65,  forme: "sawtooth", volume: 0.08 }
+  boss:   { base: 65,  forme: "sawtooth", volume: 0.08 },
+  robot:  { base: 200, forme: "square",   volume: 0.06 }
 };
 
 function voix(texte, profil, hauteur, delaiSecondes) {
@@ -113,8 +136,8 @@ document.addEventListener("keyup", function (e) {
 });
 
 function tirer() {
-  if (finDuJeu) return;
-  const arme = ARMES[niveauArme];
+  if (finDuJeu || enAttente || victoire || enPause) return;
+  const arme = armeActive();
   recharge = arme.cadence;
   if (!joueurBulle.bulle && Math.random() < 0.12) {
     parler(joueurBulle, choisir(PHRASES_HEROS));
@@ -123,8 +146,41 @@ function tirer() {
   const milieu = joueur.x + joueur.largeur / 2;
   for (let i = 0; i < arme.balles; i++) {
     const decalage = (i - (arme.balles - 1) / 2) * 12;
-    balles.push({ x: milieu + decalage, y: SOL - 50 });
+    balles.push({
+      x: milieu + decalage,
+      y: SOL - 50,
+      dx: (i - (arme.balles - 1) / 2) * (arme.eventail || 0), // les balles s'écartent
+      degats: (arme.degats || 1) * forceJoueur() // la force du héros multiplie les dégâts
+    });
   }
+}
+
+// Expérience : chaque zombie battu donne de l'exp, chaque niveau rend le héros plus fort
+let xp = 0;
+let niveauJoueur = 1;
+
+function xpPourNiveauSuivant() {
+  return niveauJoueur * 10;
+}
+
+// Le héros est déjà plus fort qu'avant (1,5) et gagne 0,25 de force par niveau
+function forceJoueur() {
+  return 1.5 + (niveauJoueur - 1) * 0.25;
+}
+
+function gagnerXp(n) {
+  xp += n;
+  while (xp >= xpPourNiveauSuivant()) {
+    xp -= xpPourNiveauSuivant();
+    niveauJoueur++;
+    animMontee = 40;
+    parler(joueurBulle, "Niveau " + niveauJoueur + " ! Je suis plus fort !");
+  }
+}
+
+// L'arme de la boutique (si on en a équipé une), sinon celle ramassée sur le chemin
+function armeActive() {
+  return armeEquipee || ARMES[niveauArme];
 }
 
 // Les alliés arrivent toutes les 3 vagues
@@ -155,14 +211,18 @@ function nouvelAllie() {
 let bombeItem = null;
 let bombeDispo = false;
 let flashBlanc = 0;
+let bombeUtilisee = false; // pour une quête
 
 function lancerBombe() {
-  if (finDuJeu || !bombeDispo) return;
+  if (finDuJeu || enAttente || enPause || !bombeDispo) return;
   bombeDispo = false;
+  bombeUtilisee = true;
   flashBlanc = 1;
   zombies.forEach(function (z) {
     z.touche = true;
     zombiesTues++;
+    gagnerPieces(z.boss ? 5 : 1);
+    gagnerXp(z.boss ? 10 : 2);
     score += z.boss ? 10 : 1;
   });
   zombies = zombies.filter(function (z) { return !z.touche; });
@@ -176,8 +236,16 @@ function nouvelleVague() {
     bombeItem = { x: 80 + Math.random() * (canvas.width - 160), y: -30 };
     parler(joueurBulle, "Une bombe arrive du ciel !");
   }
+  if (vague === 10 && !mevha) {
+    mevha = { x: 200, largeur: 50, vitesse: 3.5, recharge: 20, bulle: null };
+    parler(mevha, "Mevha est là pour t'aider !");
+  }
+  if (vague === 15) {
+    animManoir = 240; // petite scène : le héros entre dans le manoir
+    parler(joueurBulle, "Un manoir sinistre...");
+  }
   if (vague > 1) parler(joueurBulle, "Ils reviennent !");
-  zombiesAApparaitre = 3 + vague * 2;
+  zombiesAApparaitre = 3 + vague; // les vagues passent plus vite
   prochainZombie = 0;
 }
 
@@ -200,42 +268,121 @@ function tenueAleatoire(boss) {
 }
 
 function nouveauZombie(boss) {
-  const type = boss ? TYPES_BOSS[(vague / 2 - 1) % TYPES_BOSS.length] : "zombie";
+  // Vague 50 : le roi squelette. À partir de la vague 15 (le manoir) : des squelettes qui tirent.
+  const roi = boss && vague === 50;
+  // Dans le manoir, 3 monstres sur 10 sont des chevaliers noirs à cheval qui chargent
+  const chevalier = !boss && vague >= 15 && !hardcore && Math.random() < 0.3;
+  // Dès la vague 7, 3 monstres sur 10 sont des squelettes en feu qui lancent des bombes
+  const feu = !boss && vague >= 7 && !hardcore && !chevalier && Math.random() < 0.3;
+  const sbire = !boss && vague >= 15 && !hardcore && !chevalier && !feu;
+  // Mode hardcore : tous les monstres sont des fantômes (sauf le roi squelette)
+  const type = roi || sbire || feu ? "squelette" : chevalier ? "chevalier" : hardcore ? "fantome" : boss ? TYPES_BOSS[(vague / 2 - 1) % TYPES_BOSS.length] : "zombie";
+  // plus de vie à chaque vague, deux fois plus en hardcore, et les chevaliers sont solides
+  const pvDepart = (boss ? 6 + vague * 3 : Math.ceil(vague * 0.7) + (niveau - 1)) * (hardcore ? 2 : 1) * (chevalier ? 2 : 1);
   zombies.push({
     type: type,
+    tireur: roi || sbire,
+    roi: roi,
+    feu: feu,
+    bombeDans: 80 + Math.random() * 80,
+    tirDans: 60 + Math.random() * 80,
     tenue: tenueAleatoire(boss),
     hauteurVoix: 0.8 + Math.random() * 0.4,
     x: 20 + Math.random() * (canvas.width - 70),
     y: boss ? -100 : -50,
-    largeur: boss ? 60 : 30,
-    hauteur: boss ? 100 : 50,
+    largeur: boss ? 60 : chevalier ? 40 : 30,
+    hauteur: boss ? 100 : chevalier ? 64 : 50,
     echelle: boss ? 2 : 1,
     boss: boss,
-    pv: boss ? 6 + vague * 3 : Math.ceil(vague * 0.7), // plus de vie à chaque vague
-    pvMax: boss ? 6 + vague * 3 : Math.ceil(vague * 0.7),
-    vitesse: boss ? 1 + vague * 0.05 : 1.8 + Math.random() * 0.8 + vague * 0.2, // plus rapide à chaque vague
+    pv: pvDepart,
+    pvMax: pvDepart,
+    // plus rapide à chaque vague, et une fois et demie plus rapide en hardcore
+    vitesse: (roi ? 0.6 : boss ? 1 + vague * 0.05 : 1.8 + Math.random() * 0.8 + vague * 0.2) * (hardcore ? 1.5 : 1) * (chevalier ? 1.6 : 1),
     phase: Math.random() * 10,     // pour que chaque zombie ait son propre rythme
     balancement: 0.5 + Math.random() * 0.8
   });
   // Le boss se présente, les autres parlent parfois
   const nouveau = zombies[zombies.length - 1];
-  if (boss) parler(nouveau, PHRASES_TYPE_BOSS[type]);
+  if (roi) parler(nouveau, "Je suis le roi squelette !");
+  else if (boss) parler(nouveau, PHRASES_TYPE_BOSS[type]);
+  else if (chevalier && Math.random() < 0.5) parler(nouveau, "Hiii-ha ! À l'attaque !");
   else if (Math.random() < 0.25) parler(nouveau, choisir(PHRASES_ZOMBIES));
 }
 
+// Un squelette lance une boule de feu vers le héros (bleue et géante pour le roi)
+function lancerBoule(z) {
+  const x = z.x + z.largeur / 2;
+  const y = z.y + z.hauteur * 0.5;
+  const dx = joueur.x + joueur.largeur / 2 - x;
+  const dy = SOL - 30 - y;
+  const d = Math.hypot(dx, dy) || 1;
+  const v = z.roi ? 3 : 4;
+  boules.push({
+    x: x, y: y,
+    vx: dx / d * v, vy: dy / d * v,
+    r: z.roi ? 26 : 10,
+    bleue: z.roi,
+    degats: z.roi ? 10 : 5
+  });
+}
+
+// Le héros perd des vies (zombie arrivé en bas ou boule de feu)
+function toucherHeros(degats) {
+  vies -= degats;
+  flashRouge = 1;
+  parler(joueurBulle, "Aïe !");
+  zombieRepond();
+  if (vies <= 0 && !finDuJeu) {
+    finDuJeu = true;
+    boutonRejouer.style.display = "inline-block";
+    boutonMenu.style.display = "inline-block";
+    musiqueDefaite();
+  }
+}
+
+// Niveau terminé : on propose de continuer ou d'aller au lobby
+function finirNiveau() {
+  victoire = true;
+  boules = [];
+  bombesFeu = [];
+  confettis = [];
+  for (let i = 0; i < 80; i++) {
+    confettis.push({
+      x: Math.random() * canvas.width,
+      y: -Math.random() * 300,
+      vy: 1.5 + Math.random() * 2.5,
+      vx: Math.random() - 0.5,
+      taille: 4 + Math.random() * 5,
+      couleur: choisir(COULEURS_NIVEAU.concat(["#fff", "#d32f2f"]))
+    });
+  }
+  document.getElementById("texteVictoire").textContent = "Bravo ! Level " + niveau + " terminé !";
+  document.getElementById("boutonContinuer").textContent = "Continuer au level " + (niveau + 1);
+  document.getElementById("victoire").style.display = "flex";
+}
+
 function miseAJour() {
-  if (finDuJeu) return;
+  if (finDuJeu || enAttente || victoire || enPause) return;
   temps++;
+  if (animManoir > 0) { // pendant la scène du manoir, le jeu attend
+    animManoir--;
+    return;
+  }
+  if (animNiveau > 0) animNiveau--;
+  if (animMontee > 0) animMontee--;
 
   if (touches["ArrowLeft"] && joueur.x > 0) joueur.x -= joueur.vitesse;
   if (touches["ArrowRight"] && joueur.x < canvas.width - joueur.largeur) joueur.x += joueur.vitesse;
 
   // Tir automatique en gardant espace appuyé (AK-47 et mitraillette)
   recharge--;
-  if (touches["Space"] && ARMES[niveauArme].cadence > 0 && recharge <= 0) tirer();
+  if (touches["Space"] && armeActive().cadence > 0 && recharge <= 0) tirer();
 
-  balles.forEach(function (b) { b.y -= 10; });
-  balles = balles.filter(function (b) { return b.y > -10; });
+  balles.forEach(function (b) {
+    b.y -= 10;
+    b.x += b.dx || 0;
+  });
+  balles = balles.filter(function (b) { return b.y > -10 && b.x > -10 && b.x < canvas.width + 10; });
 
   // Les armes tombent du ciel, le héros les ramasse en les touchant
   prochaineArme--;
@@ -269,11 +416,16 @@ function miseAJour() {
       zombiesAApparaitre--;
       // Toutes les 2 vagues, le dernier à arriver est un gros boss
       nouveauZombie(vague % 2 === 0 && zombiesAApparaitre === 0);
-      prochainZombie = 40 - Math.min(vague * 2, 20);
+      prochainZombie = 30 - Math.min(vague, 20);
     }
   } else if (zombies.length === 0) {
+    if (pause === 0) gagnerTrophees(5); // 5 trophées à chaque vague terminée
+    if (vague >= 50) {
+      finirNiveau();
+      return;
+    }
     pause++;
-    if (pause > 120) {
+    if (pause > 50) {
       pause = 0;
       nouvelleVague();
     }
@@ -289,6 +441,72 @@ function miseAJour() {
     z.x += Math.sin((temps + z.phase * 10) / 15) * z.balancement * 0.5;
     z.x = Math.max(0, Math.min(canvas.width - z.largeur, z.x));
   });
+
+  // Les squelettes en feu lancent une bombe sur l'endroit où se trouve le héros
+  zombies.forEach(function (z) {
+    if (!z.feu || z.y < 0) return;
+    z.bombeDans--;
+    if (z.bombeDans <= 0) {
+      z.bombeDans = 170;
+      bombesFeu.push({
+        sx: z.x + z.largeur / 2, sy: z.y,
+        cx: joueur.x + joueur.largeur / 2 + (Math.random() - 0.5) * 30, cy: SOL - 25,
+        t: 0, duree: 70, explose: 0
+      });
+    }
+  });
+  bombesFeu.forEach(function (b) {
+    b.t++;
+    if (b.t === b.duree) {
+      b.explose = 20; // la bombe explose : dégâts si le héros est tout près
+      if (Math.hypot(b.cx - (joueur.x + joueur.largeur / 2), b.cy - (SOL - 25)) < 50) toucherHeros(5);
+    } else if (b.t > b.duree) {
+      b.explose--;
+    }
+  });
+  bombesFeu = bombesFeu.filter(function (b) { return b.t <= b.duree || b.explose > 0; });
+
+  // Les squelettes tirent des boules de feu
+  zombies.forEach(function (z) {
+    if (!z.tireur || z.y < 0) return;
+    z.tirDans--;
+    if (z.tirDans <= 0) {
+      z.tirDans = z.roi ? 110 : 150;
+      lancerBoule(z);
+    }
+  });
+  boules.forEach(function (b) {
+    b.x += b.vx;
+    b.y += b.vy;
+    if (Math.hypot(b.x - (joueur.x + joueur.largeur / 2), b.y - (SOL - 30)) < b.r + 18) {
+      b.touche = true;
+      toucherHeros(b.degats);
+    }
+  });
+  boules = boules.filter(function (b) {
+    return !b.touche && b.y < canvas.height + 40 && b.x > -40 && b.x < canvas.width + 40;
+  });
+
+  // Mevha le robot se place sous le zombie le plus bas et tire vite
+  if (mevha) {
+    let cible = null;
+    zombies.forEach(function (z) {
+      if (!cible || z.y > cible.y) cible = z;
+    });
+    mevha.marche = 0;
+    mevha.recharge--;
+    if (cible) {
+      const dx = cible.x + cible.largeur / 2 - (mevha.x + mevha.largeur / 2);
+      if (Math.abs(dx) > mevha.vitesse) {
+        mevha.x += dx > 0 ? mevha.vitesse : -mevha.vitesse;
+      } else if (mevha.recharge <= 0 && cible.y > 0) {
+        balles.push({ x: mevha.x + 1, y: SOL - 70 });
+        balles.push({ x: mevha.x + 49, y: SOL - 70 });
+        mevha.recharge = 22;
+      }
+    }
+    mevha.x = Math.max(0, Math.min(canvas.width - mevha.largeur, mevha.x));
+  }
 
   // Les alliés se placent sous le zombie le plus proche et tirent dessus
   allies.forEach(function (a) {
@@ -312,21 +530,34 @@ function miseAJour() {
   });
 
   // Les bulles de dialogue disparaissent au bout d'un moment
-  zombies.concat(allies, [joueurBulle]).forEach(function (o) {
+  zombies.concat(allies, [joueurBulle], mevha ? [mevha] : []).forEach(function (o) {
     if (!o.bulle) return;
     if (o.bulle.delai > 0) o.bulle.delai--;
     else if (--o.bulle.reste <= 0) o.bulle = null;
   });
+
+  // Une balle arrête une petite boule de feu (pas la géante)
+  balles.forEach(function (b) {
+    boules.forEach(function (f) {
+      if (!f.bleue && !f.touche && Math.abs(b.x - f.x) < f.r + 3 && Math.abs(b.y - f.y) < f.r + 10) {
+        f.touche = true;
+        b.y = -100;
+      }
+    });
+  });
+  boules = boules.filter(function (f) { return !f.touche; });
 
   // Une balle touche un zombie
   balles.forEach(function (b) {
     zombies.forEach(function (z) {
       if (!z.touche && b.x > z.x && b.x < z.x + z.largeur && b.y > z.y - 10 * z.echelle && b.y < z.y + z.hauteur) {
         b.y = -100;
-        z.pv--;
+        z.pv -= b.degats || 1;
         if (z.pv <= 0) {
           z.touche = true;
           zombiesTues++;
+          gagnerPieces(z.boss ? 5 : 1);
+          gagnerXp(z.boss ? 10 : 2);
           score += z.boss ? 10 : 1;
         }
       }
@@ -337,15 +568,7 @@ function miseAJour() {
   zombies.forEach(function (z) {
     if (z.y + z.hauteur >= SOL) {
       z.touche = true;
-      vies -= 10;
-      flashRouge = 1;
-      parler(joueurBulle, "Aïe !");
-      zombieRepond();
-      if (vies <= 0 && !finDuJeu) {
-        finDuJeu = true;
-        boutonRejouer.style.display = "inline-block";
-        musiqueDefaite();
-      }
+      toucherHeros(10);
     }
   });
   zombies = zombies.filter(function (z) { return !z.touche; });
@@ -357,7 +580,9 @@ function miseAJour() {
     } catch (e) {}
   }
 
-  infos.textContent ="Vague : " + vague + " | Score : " + score + " | Vie : " + Math.max(vies, 0) + " | Arme : " + ARMES[niveauArme].nom +
+  verifierQuetes();
+
+  infos.textContent = (hardcore ? "HARDCORE | " : "") + "Level " + niveau + " | Vague : " + vague + " | Score : " + score + " | Vie : " + Math.max(vies, 0) + " | Pièces : " + pieces + " | Niveau héros : " + niveauJoueur + " (exp " + xp + "/" + xpPourNiveauSuivant() + ", force " + forceJoueur().toFixed(2) + ") | Trophées : " + trophees + " | Arme : " + armeActive().nom +
     (bombeDispo ? " | BOMBE PRÊTE : touche B" : "");
 }
 
@@ -466,6 +691,7 @@ const PHRASES_HEROS = ["Prends ça !", "Pas touche !", "Reste là !", "Je n'ai p
 const PHRASES_ZOMBIES = ["Grrr !", "Hé, attends-moi !", "J'ai faim...", "Rrrah !", "Je t'arrive !"];
 const PHRASES_BOSS = ["Je suis le chef !", "Tu ne m'arrêteras pas !"];
 const PHRASES_TYPE_BOSS = {
+  fantome: "Ouuuh ! Je suis le roi des fantômes !",
   citrouille: "Bouh ! Je suis la citrouille !",
   squelette: "Clac clac ! Squelette !",
   zombie: "Je suis le grand chef !"
@@ -474,7 +700,7 @@ const joueurBulle = { bulle: null };
 
 function parler(qui, texte, delai) {
   qui.bulle = { texte: texte, reste: 110, delai: delai || 0 };
-  const profil = qui === joueurBulle ? "heros" : qui.couleur ? "allie" : qui.boss ? "boss" : "zombie";
+  const profil = qui === joueurBulle ? "heros" : qui === mevha ? "robot" : qui.couleur ? "allie" : qui.boss ? "boss" : "zombie";
   voix(texte, profil, qui.hauteurVoix || 1, (delai || 0) / 60);
 }
 
@@ -512,8 +738,193 @@ function dessinerBulle(qui, x, y) {
   ctx.fillText(b.texte, bx + largeur / 2, by + 15);
 }
 
+// Dessine un fantôme (mode hardcore) : il flotte et sa couleur change un peu
+function dessinerFantome(z) {
+  const flotte = Math.sin(temps / 10 + z.phase) * 3;
+  ctx.save();
+  ctx.translate(z.x, z.y + flotte);
+  ctx.scale(z.echelle, z.echelle);
+  ctx.globalAlpha = 0.65 + Math.sin(temps / 15 + z.phase) * 0.15;
+  ctx.shadowColor = z.boss ? "#ff6060" : "#9cf";
+  ctx.shadowBlur = 15;
+  ctx.fillStyle = "#eef2ff";
+  ctx.beginPath(); // tête ronde, corps, bas en vagues
+  ctx.moveTo(0, 50);
+  ctx.lineTo(0, 15);
+  ctx.arc(15, 15, 15, Math.PI, 0);
+  ctx.lineTo(30, 50);
+  ctx.lineTo(24, 44 + flotte);
+  ctx.lineTo(18, 50);
+  ctx.lineTo(12, 44 - flotte);
+  ctx.lineTo(6, 50);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath(); // petits bras
+  ctx.ellipse(-3, 30 + brasFantome(z), 5, 9, 0.3, 0, Math.PI * 2);
+  ctx.ellipse(33, 30 - brasFantome(z), 5, 9, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = z.boss ? "#e22" : "#111"; // yeux et bouche
+  ctx.beginPath();
+  ctx.ellipse(10, 16, 3, 5, 0, 0, Math.PI * 2);
+  ctx.ellipse(20, 16, 3, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#111";
+  ctx.beginPath();
+  ctx.ellipse(15, 29, 4, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Dessine un chevalier en armure noire sur un cheval qui galope vers le héros
+function dessinerChevalier(z) {
+  const trot = Math.sin(temps / 3 + z.phase) * 5;
+  ctx.save();
+  ctx.translate(z.x, z.y);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.3)"; // ombre
+  ctx.beginPath();
+  ctx.ellipse(20, 62, 24, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#2a1c16"; // pattes du cheval
+  ctx.fillRect(5, 42, 6, 16 + trot);
+  ctx.fillRect(14, 42, 6, 16 - trot);
+  ctx.fillRect(22, 42, 6, 16 + trot);
+  ctx.fillRect(31, 42, 6, 16 - trot);
+  ctx.fillStyle = "#3a2a22"; // corps et tête du cheval
+  ctx.beginPath();
+  ctx.ellipse(20, 38, 20, 15, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(20, 55, 8, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(13, 42, 14, 4);
+  ctx.fillStyle = "#1a1210"; // crinière et oreilles
+  ctx.fillRect(18, 42, 4, 12);
+  ctx.fillRect(13, 44, 3, 6);
+  ctx.fillRect(24, 44, 3, 6);
+  ctx.fillStyle = "#e33"; // yeux rouges
+  ctx.fillRect(15, 54, 3, 3);
+  ctx.fillRect(22, 54, 3, 3);
+  ctx.fillStyle = "#555"; // lance
+  ctx.fillRect(35, -8, 3, 52);
+  ctx.beginPath();
+  ctx.moveTo(33, -8);
+  ctx.lineTo(40, -8);
+  ctx.lineTo(36.5, -20);
+  ctx.fill();
+  ctx.fillStyle = "#15151a"; // armure noire du cavalier
+  ctx.beginPath();
+  ctx.roundRect(9, 10, 22, 28, 5);
+  ctx.fill();
+  ctx.fillStyle = "#3a3a48"; // reflets sur l'armure
+  ctx.fillRect(11, 12, 3, 22);
+  ctx.fillRect(8, 12, 7, 5);
+  ctx.fillRect(25, 12, 7, 5);
+  ctx.fillStyle = "#15151a"; // casque
+  ctx.beginPath();
+  ctx.arc(20, 4, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#e33"; // fente rouge du casque
+  ctx.fillRect(13, 3, 14, 3);
+  ctx.fillStyle = "#d32f2f"; // plumet qui flotte
+  ctx.beginPath();
+  ctx.moveTo(20, -5);
+  ctx.lineTo(14 + trot, -16);
+  ctx.lineTo(24 + trot, -12);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Scène de la vague 15 : le héros entre dans le manoir et les squelettes l'attendent
+function dessinerSceneManoir() {
+  const p = 1 - animManoir / 240; // va de 0 à 1
+  const ouverture = Math.max(0, Math.min((p - 0.15) / 0.3, 1)); // la porte s'ouvre
+  const marche = Math.max(0, Math.min((p - 0.3) / 0.45, 1));    // le héros avance
+  ctx.save();
+  ctx.fillStyle = "#07030f"; // nuit
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#c9c2e0"; // lune
+  ctx.beginPath();
+  ctx.arc(400, 70, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#1d1426"; // murs et tours du manoir
+  ctx.fillRect(80, 220, 340, 260);
+  ctx.fillRect(60, 160, 70, 320);
+  ctx.fillRect(370, 160, 70, 320);
+  ctx.fillStyle = "#10091a"; // toits pointus
+  [[50, 140, 95, 90], [360, 450, 405, 90], [70, 430, 250, 140]].forEach(function (t, i) {
+    const basY = i === 2 ? 220 : 160;
+    ctx.beginPath();
+    ctx.moveTo(t[0], basY);
+    ctx.lineTo(t[1], basY);
+    ctx.lineTo(t[2], t[3]);
+    ctx.fill();
+  });
+  [[110, 250], [160, 250], [310, 250], [360, 250], [85, 190], [395, 190]].forEach(function (f, i) {
+    ctx.fillStyle = "rgba(255, 154, 42, " + (0.6 + Math.sin(temps / 6 + i * 2) * 0.35) + ")"; // bougies
+    ctx.fillRect(f[0], f[1], 22, 30);
+  });
+  ctx.fillStyle = "#140c18"; // sol
+  ctx.fillRect(0, 480, canvas.width, 120);
+  ctx.fillStyle = "#000"; // l'intérieur de la porte
+  ctx.fillRect(205, 330, 90, 150);
+  ctx.fillStyle = "rgba(255, 154, 42, " + ouverture * 0.5 + ")";
+  ctx.fillRect(210, 335, 80, 145);
+  ctx.fillStyle = "#4a2a14"; // les deux battants s'écartent
+  ctx.fillRect(210, 335, 40 * (1 - ouverture), 145);
+  ctx.fillRect(290 - 40 * (1 - ouverture), 335, 40 * (1 - ouverture), 145);
+  // Deux squelettes surgissent sur les côtés et lancent des boules de feu
+  const surgit = Math.max(0, Math.min((p - 0.6) / 0.2, 1));
+  [140, 360].forEach(function (sx) {
+    if (surgit <= 0) return;
+    ctx.fillStyle = "#f2f2ea";
+    ctx.beginPath();
+    ctx.arc(sx, 430, 16 * surgit, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(sx - 8 * surgit, 440, 16 * surgit, 30 * surgit);
+    ctx.fillStyle = "#222";
+    ctx.beginPath();
+    ctx.arc(sx - 6 * surgit, 428, 4 * surgit, 0, Math.PI * 2);
+    ctx.arc(sx + 6 * surgit, 428, 4 * surgit, 0, Math.PI * 2);
+    ctx.fill();
+    const tir = Math.max(0, (p - 0.8) / 0.2); // la boule de feu file vers le héros
+    if (tir > 0) {
+      ctx.fillStyle = "#ff7a1a";
+      ctx.beginPath();
+      ctx.arc(sx + (250 - sx) * tir, 430 + (400 - 430) * tir, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+  // Le héros marche vers la porte et devient plus petit
+  ctx.save();
+  ctx.translate(250, 560 - marche * 120);
+  ctx.scale(1 - 0.4 * marche, 1 - 0.4 * marche);
+  dessinerHeros(-15, -50, tenueHeros, marche < 1 ? temps / 3 : 0, armeEquipee || niveauArme);
+  ctx.restore();
+  ctx.fillStyle = "#fff"; // titre
+  ctx.font = "bold 32px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("Le manoir sinistre...", canvas.width / 2, 50);
+  const noir = p < 0.1 ? 1 - p / 0.1 : p > 0.93 ? (p - 0.93) / 0.07 : 0; // fondu au noir
+  ctx.fillStyle = "rgba(0, 0, 0, " + noir + ")";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
+function brasFantome(z) {
+  return Math.sin(temps / 8 + z.phase) * 3;
+}
+
 // Dessine un zombie ou un boss avec ses vêtements au hasard
 function dessinerZombie(z) {
+  if (z.type === "fantome") {
+    dessinerFantome(z);
+    return;
+  }
+  if (z.type === "chevalier") {
+    dessinerChevalier(z);
+    return;
+  }
   const t = z.tenue;
   const peau = z.type === "citrouille" ? "#f08a24" : z.type === "squelette" ? "#f2f2ea" : (z.boss ? "#6fb04a" : "#8fd16a");
   const brasBouge = Math.sin(temps / 8 + z.phase) * 4;
@@ -663,6 +1074,24 @@ function dessinerZombie(z) {
       ctx.fill();
     }
   }
+  // Squelette en feu : des flammes sur la tête et les épaules
+  if (z.feu) {
+    for (let f = 0; f < 5; f++) {
+      const fx = 3 + f * 6;
+      const h = 14 + Math.sin(temps / 3 + f * 2 + z.phase) * 5;
+      ctx.fillStyle = f % 2 ? "#ffd400" : "#ff6a1a";
+      ctx.beginPath();
+      ctx.moveTo(fx - 4, -8);
+      ctx.lineTo(fx, -8 - h);
+      ctx.lineTo(fx + 4, -8);
+      ctx.fill();
+    }
+    ctx.fillStyle = "rgba(255, 106, 26, 0.7)";
+    ctx.beginPath();
+    ctx.arc(2, 14, 6 + Math.sin(temps / 4) * 2, 0, Math.PI * 2);
+    ctx.arc(28, 14, 6 + Math.cos(temps / 4) * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 
@@ -706,6 +1135,141 @@ const THEMES = [
   }
 ];
 
+// À partir de la vague 15 : le manoir sinistre et ténébreux
+const THEME_MANOIR = {
+  ciel: ["#05020a", "#120818", "#241230"], astre: "#c9c2e0", lueur: "170, 150, 230",
+  nuage: "rgba(10, 5, 20, 0.6)", route: "#2a2230", trottoir: "#3c3244",
+  immeubles: ["#1a1220", "#221828", "#160e1c", "#1e1424"], fenetre: "#ff9a2a",
+  sol: "#140c18", ombre: "rgba(0, 0, 10, 0.6)", etoiles: true, brouillard: "rgba(120, 100, 160, 0.14)"
+};
+
+// Dessine le héros avec sa tenue (normale, ninja ou samouraï).
+// (x, y) = haut de la tête. Si arme vaut null, on ne dessine pas d'arme (aperçu boutique).
+function dessinerHeros(x, y, t, marche, arme) {
+  dessinerPersonnage(x, y, t.corps, "#f5c9a0", marche);
+  if (t.style === "samourai") {
+    ctx.fillStyle = t.accent; // épaulières dorées
+    ctx.fillRect(x - 5, y + 10, 10, 6);
+    ctx.fillRect(x + 25, y + 10, 10, 6);
+  }
+  if (t.style === "ninja") {
+    ctx.fillStyle = t.casque; // cagoule
+    ctx.beginPath();
+    ctx.arc(x + 15, y, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#f5c9a0"; // fente pour les yeux
+    ctx.fillRect(x + 5, y - 3, 20, 8);
+    ctx.fillStyle = t.accent; // bandeau avec ses deux rubans
+    ctx.fillRect(x + 3, y - 9, 24, 4);
+    ctx.fillRect(x + 27, y - 8, 9, 2);
+    ctx.fillRect(x + 27, y - 5, 7, 2);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(x + 9, y - 1, 3, 4);
+    ctx.fillRect(x + 18, y - 1, 3, 4);
+  } else {
+    ctx.fillStyle = t.casque; // casque
+    ctx.beginPath();
+    ctx.arc(x + 15, y, 12, Math.PI, 0);
+    ctx.fill();
+    ctx.fillRect(x + 1, y - 2, 28, 4);
+    if (t.style === "samourai") {
+      ctx.fillRect(x + 1, y + 1, 4, 9); // protections des joues
+      ctx.fillRect(x + 25, y + 1, 4, 9);
+      ctx.fillStyle = t.accent; // les deux cornes dorées
+      ctx.beginPath();
+      ctx.moveTo(x + 6, y - 9);
+      ctx.lineTo(x + 1, y - 24);
+      ctx.lineTo(x + 14, y - 11);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x + 24, y - 9);
+      ctx.lineTo(x + 29, y - 24);
+      ctx.lineTo(x + 16, y - 11);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "#8f84e8"; // reflet sur le casque
+      ctx.fillRect(x + 8, y - 8, 6, 3);
+    }
+    ctx.fillStyle = "#000"; // yeux et sourire
+    ctx.fillRect(x + 9, y + 1, 3, 4);
+    ctx.fillRect(x + 18, y + 1, 3, 4);
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x + 15, y + 5, 4, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+  }
+  // Bras et mains qui tiennent l'arme
+  ctx.fillStyle = t.corps;
+  ctx.fillRect(x - 5, y + 12, 7, 22);
+  ctx.fillRect(x + 28, y + 12, 7, 22);
+  ctx.fillStyle = "#f5c9a0";
+  ctx.fillRect(x + 12, y + 10, 6, 6);
+  if (arme !== null) {
+    if (typeof arme === "object") dessinerArmeBoutique(x + 15, y + 12, arme);
+    else dessinerArme(x + 15, y + 12, arme);
+  }
+}
+
+// Dessine une arme achetée dans la boutique
+function dessinerArmeBoutique(cx, by, a) {
+  ctx.fillStyle = a.couleur;
+  ctx.fillRect(cx - a.largeur / 2, by - a.longueur, a.largeur, a.longueur);
+  ctx.fillStyle = "#222"; // bout du canon
+  ctx.fillRect(cx - a.largeur / 2 - 1, by - a.longueur, a.largeur + 2, 4);
+  ctx.fillStyle = "#7a4a22"; // crosse
+  ctx.fillRect(cx - 3, by - 2, 7, 10);
+}
+
+// Dessine un aperçu du héros dans un petit canvas (pour la boutique)
+function apercu(cv, tenue) {
+  const principal = ctx;
+  ctx = cv.getContext("2d");
+  ctx.fillStyle = "#3a2450";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.save();
+  ctx.scale(1.1, 1.1);
+  dessinerHeros(10, 26, tenue, 0, null);
+  ctx.restore();
+  ctx = principal;
+}
+
+// Dessine Mevha, le robot géant qui aide le héros
+function dessinerMevha(m) {
+  const y = SOL - 70;
+  ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+  ctx.beginPath();
+  ctx.ellipse(m.x + 25, y + 72, 30, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#4a5a6a"; // pieds
+  ctx.fillRect(m.x + 6, y + 52, 14, 18);
+  ctx.fillRect(m.x + 30, y + 52, 14, 18);
+  ctx.fillStyle = "#333"; // canons sur les épaules
+  ctx.fillRect(m.x - 2, y, 6, 24);
+  ctx.fillRect(m.x + 46, y, 6, 24);
+  ctx.fillStyle = "#7a8fa6"; // corps
+  ctx.beginPath();
+  ctx.roundRect(m.x, y + 16, 50, 40, 6);
+  ctx.fill();
+  ctx.fillStyle = "#2a8fbd"; // écran
+  ctx.fillRect(m.x + 15, y + 26, 20, 12);
+  ctx.fillStyle = "#ffd400";
+  ctx.fillRect(m.x + 20, y + 30, 10, 4);
+  ctx.fillStyle = "#9fb4c8"; // tête
+  ctx.beginPath();
+  ctx.roundRect(m.x + 10, y - 2, 30, 20, 5);
+  ctx.fill();
+  ctx.fillStyle = "#5ff"; // yeux
+  ctx.fillRect(m.x + 16, y + 5, 6, 6);
+  ctx.fillRect(m.x + 28, y + 5, 6, 6);
+  ctx.fillStyle = "#9fb4c8"; // antenne
+  ctx.fillRect(m.x + 24, y - 12, 2, 10);
+  ctx.fillStyle = "#e33";
+  ctx.beginPath();
+  ctx.arc(m.x + 25, y - 13, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 // Étoiles placées une seule fois au hasard
 const etoiles = [];
 for (let i = 0; i < 40; i++) {
@@ -716,7 +1280,7 @@ function dessiner() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   // Le décor dépend de la vague
-  const th = THEMES[(Math.max(vague, 1) - 1) % THEMES.length];
+  const th = vague >= 15 ? THEME_MANOIR : THEMES[(Math.max(vague, 1) - 1) % THEMES.length];
 
   // Ciel
   const ciel = ctx.createLinearGradient(0, 0, 0, canvas.height);
@@ -873,6 +1437,54 @@ function dessiner() {
     ctx.stroke();
   }
 
+  // Boules de feu : orange, ou bleue et géante pour le roi squelette
+  boules.forEach(function (b) {
+    const halo = b.bleue ? "80, 160, 255" : "255, 140, 30";
+    ctx.fillStyle = "rgba(" + halo + ", 0.35)";
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = b.bleue ? "#4a9bff" : "#ff7a1a";
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = b.bleue ? "#d8ecff" : "#ffe27a";
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Bombes des squelettes en feu : une zone rouge montre où elles vont tomber
+  bombesFeu.forEach(function (b) {
+    if (b.t <= b.duree) {
+      const u = b.t / b.duree;
+      ctx.fillStyle = "rgba(255, 60, 30, " + (0.12 + u * 0.25) + ")";
+      ctx.beginPath();
+      ctx.arc(b.cx, b.cy, 50, 0, Math.PI * 2);
+      ctx.fill();
+      const x = b.sx + (b.cx - b.sx) * u;
+      const y = b.sy + (b.cy - b.sy) * u - Math.sin(Math.PI * u) * 120; // elle vole en arc
+      ctx.fillStyle = "#222";
+      ctx.beginPath();
+      ctx.arc(x, y, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffd400"; // mèche allumée
+      ctx.beginPath();
+      ctx.arc(x + 5, y - 10, 3 + Math.sin(temps) , 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      const k = 1 - b.explose / 20; // l'explosion grandit puis disparaît
+      ctx.fillStyle = "rgba(255, 140, 30, " + (1 - k) * 0.8 + ")";
+      ctx.beginPath();
+      ctx.arc(b.cx, b.cy, 20 + k * 40, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255, 230, 120, " + (1 - k) + ")";
+      ctx.beginPath();
+      ctx.arc(b.cx, b.cy, (20 + k * 40) * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
   // Balles
   balles.forEach(function (b) {
     ctx.fillStyle = "rgba(255, 200, 0, 0.3)"; // traînée lumineuse
@@ -880,6 +1492,8 @@ function dessiner() {
     ctx.fillStyle = "#fff6a0";
     ctx.fillRect(b.x - 2, b.y, 4, 10);
   });
+
+  if (mevha) dessinerMevha(mevha);
 
   // Alliés : ils ressemblent au héros avec d'autres couleurs
   allies.forEach(function (a) {
@@ -898,32 +1512,7 @@ function dessiner() {
 
   // Héros avec son pistolet
   const marche = (touches["ArrowLeft"] || touches["ArrowRight"]) ? temps / 3 : 0;
-  dessinerPersonnage(joueur.x, SOL - 50, "#d32f2f", "#f5c9a0", marche);
-  // Casque bleu mauve
-  ctx.fillStyle = "#6a5acd";
-  ctx.beginPath();
-  ctx.arc(joueur.x + 15, SOL - 50, 12, Math.PI, 0);
-  ctx.fill();
-  ctx.fillRect(joueur.x + 1, SOL - 52, 28, 4);
-  ctx.fillStyle = "#8f84e8"; // reflet sur le casque
-  ctx.fillRect(joueur.x + 8, SOL - 58, 6, 3);
-  // Yeux et sourire
-  ctx.fillStyle = "#000";
-  ctx.fillRect(joueur.x + 9, SOL - 49, 3, 4);
-  ctx.fillRect(joueur.x + 18, SOL - 49, 3, 4);
-  ctx.strokeStyle = "#000";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.arc(joueur.x + 15, SOL - 45, 4, 0.2, Math.PI - 0.2);
-  ctx.stroke();
-  // Bras rouges et mains qui tiennent l'arme
-  ctx.fillStyle = "#d32f2f";
-  ctx.fillRect(joueur.x - 5, SOL - 38, 7, 22);
-  ctx.fillRect(joueur.x + 28, SOL - 38, 7, 22);
-  ctx.fillStyle = "#f5c9a0";
-  ctx.fillRect(joueur.x + 12, SOL - 40, 6, 6);
-  // Arme : chaque niveau a son propre dessin
-  dessinerArme(joueur.x + 15, SOL - 38, niveauArme);
+  dessinerHeros(joueur.x, SOL - 50, tenueHeros, marche, armeEquipee || niveauArme);
 
   // Coins sombres pour une ambiance de fin de journée
   const ombre = ctx.createRadialGradient(250, 300, 250, 250, 300, 420);
@@ -963,6 +1552,16 @@ function dessiner() {
   ctx.fillStyle = "#ffd400";
   ctx.fillText("Record : " + record, canvas.width - 102, 58);
 
+  // Barre d'expérience du héros, en haut au milieu
+  ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+  ctx.fillRect(150, 10, 170, 16);
+  ctx.fillStyle = "#4ac8ff";
+  ctx.fillRect(150, 10, 170 * xp / xpPourNiveauSuivant(), 16);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 12px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("Niveau " + niveauJoueur, 235, 22);
+
   // Éclair blanc de la super bombe (sans rien de choquant : tout le monde disparaît dans la lumière)
   if (flashBlanc > 0) {
     ctx.fillStyle = "rgba(255, 255, 240, " + flashBlanc + ")";
@@ -982,6 +1581,7 @@ function dessiner() {
   allies.forEach(function (a) {
     dessinerBulle(a, a.x + a.largeur / 2, SOL - 85);
   });
+  if (mevha) dessinerBulle(mevha, mevha.x + mevha.largeur / 2, SOL - 100);
   dessinerBulle(joueurBulle, joueur.x + joueur.largeur / 2, SOL - 100);
 
   // Bordure rouge qui s'estompe quand le héros est touché
@@ -1001,6 +1601,51 @@ function dessiner() {
     ctx.textAlign = "center";
     ctx.fillText("Vague " + vague + " terminée !", canvas.width / 2, 250);
   }
+
+  // Anneau qui grandit autour du héros quand il monte de niveau
+  if (animMontee > 0) {
+    const r = (40 - animMontee) * 2.5 + 10;
+    ctx.strokeStyle = "rgba(74, 200, 255, " + animMontee / 40 + ")";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(joueur.x + joueur.largeur / 2, SOL - 25, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Confettis de fin de niveau
+  if (victoire) {
+    confettis.forEach(function (c) {
+      c.y += c.vy;
+      c.x += c.vx + Math.sin(c.y / 20) * 0.8;
+      if (c.y > canvas.height) c.y = -10;
+      ctx.fillStyle = c.couleur;
+      ctx.fillRect(c.x, c.y, c.taille, c.taille * 0.6);
+    });
+  }
+
+  // Animation de début de niveau : le titre grossit, reste un moment, puis s'efface
+  if (animNiveau > 0) {
+    const p = 1 - animNiveau / 150; // va de 0 à 1
+    const alpha = p < 0.2 ? p / 0.2 : p > 0.8 ? (1 - p) / 0.2 : 1;
+    const entree = Math.min(p / 0.3, 1);
+    const couleur = COULEURS_NIVEAU[(niveau - 1) % COULEURS_NIVEAU.length];
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillRect(0, 200, canvas.width, 140);
+    ctx.fillStyle = couleur; // deux bandes qui glissent
+    ctx.fillRect(0, 198, canvas.width * entree, 4);
+    ctx.fillRect(canvas.width * (1 - entree), 338, canvas.width * entree, 4);
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(30 + entree * 40) + "px Arial";
+    ctx.fillText("NIVEAU " + niveau, canvas.width / 2, 285);
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px Arial";
+    ctx.fillText(hardcore ? "Mode hardcore : attention aux fantômes !" : "Prépare-toi !", canvas.width / 2, 320);
+    ctx.restore();
+  }
+
+  if (animManoir > 0) dessinerSceneManoir();
 
   if (finDuJeu) {
     ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
@@ -1037,17 +1682,343 @@ function rejouer() {
   recharge = 0;
   bombeItem = null;
   bombeDispo = false;
+  bombeUtilisee = false;
+  xp = 0;
+  niveauJoueur = 1;
+  confettis = [];
+  animMontee = 0;
+  animNiveau = 0;
+  animManoir = 0;
   joueurBulle.bulle = null;
   touches = {};
   finDuJeu = false;
+  niveau = 1;
+  victoire = false;
+  enPause = false;
+  boules = [];
+  bombesFeu = [];
+  mevha = null;
+  document.getElementById("victoire").style.display = "none";
+  document.getElementById("pause").style.display = "none";
   boutonRejouer.style.display = "none";
+  boutonMenu.style.display = "none";
   boutonRejouer.blur();
   nouvelleVague();
 }
 
 boutonRejouer.addEventListener("click", rejouer);
 
+// ----- Menu : jouer, paramètres, boutique -----
+const ecrans = ["ecranMenu", "ecranParametres", "ecranBoutique"];
+
+function montrer(id) {
+  ecrans.forEach(function (e) {
+    document.getElementById(e).style.display = e === id ? "flex" : "none";
+  });
+  document.getElementById("piecesMenu").textContent = pieces;
+  document.getElementById("piecesBoutique").textContent = pieces;
+  document.getElementById("gemmes").textContent = gemmes;
+  document.getElementById("trophees").textContent = trophees;
+}
+
+// Lance la partie (normale ou hardcore) : on cache l'accueil
+function lancerPartie(modeHardcore) {
+  hardcore = modeHardcore;
+  animNiveau = 150;
+  enAttente = false;
+  accueil.style.display = "none";
+  initAudio();
+}
+
+boutonJouer.addEventListener("click", function () { lancerPartie(false); });
+document.getElementById("boutonHardcore").addEventListener("click", function () {
+  // On recommence au début avec des fantômes
+  rejouer();
+  lancerPartie(true);
+});
+
+document.getElementById("boutonParametres").addEventListener("click", function () {
+  montrer("ecranParametres");
+});
+document.getElementById("boutonBoutique").addEventListener("click", function () {
+  montrer("ecranBoutique");
+  montrerOnglet("tenues");
+  afficherTenues();
+});
+document.querySelectorAll(".retour").forEach(function (b) {
+  b.addEventListener("click", function () { montrer("ecranMenu"); });
+});
+
+// Réglage du son et de la luminosité
+document.getElementById("reglageSon").addEventListener("input", function (e) {
+  volumeGeneral = e.target.value / 100;
+  if (sortieSon) sortieSon.gain.value = volumeGeneral;
+});
+document.getElementById("reglageLumiere").addEventListener("input", function (e) {
+  canvas.style.filter = "brightness(" + e.target.value + "%)";
+});
+
+// ----- Pièces et tenues -----
+let pieces = 0; // gagnées en battant des zombies, gardées dans le navigateur
+try {
+  pieces = Number(localStorage.getItem("piecesZombies")) || 0;
+} catch (e) {}
+
+function gagnerPieces(n) {
+  pieces += n;
+  try {
+    localStorage.setItem("piecesZombies", pieces);
+  } catch (e) {}
+}
+
+// Trophées (5 par vague) : on peut les échanger contre des gemmes
+let trophees = 0;
+let gemmes = 0;
+let armesAchetees = []; // noms des armes de la boutique déjà achetées
+try {
+  trophees = Number(localStorage.getItem("tropheesZombies")) || 0;
+  gemmes = Number(localStorage.getItem("gemmesZombies")) || 0;
+  armesAchetees = JSON.parse(localStorage.getItem("armesAchetees")) || [];
+} catch (e) {}
+
+function sauverBoutique() {
+  try {
+    localStorage.setItem("tropheesZombies", trophees);
+    localStorage.setItem("gemmesZombies", gemmes);
+    localStorage.setItem("armesAchetees", JSON.stringify(armesAchetees));
+  } catch (e) {}
+}
+
+function gagnerTrophees(n) {
+  trophees += n;
+  sauverBoutique();
+}
+
+// Armes de la boutique : on les achète avec des gemmes
+const ARMES_BOUTIQUE = [
+  { nom: "Fusil à pompe", desc: "5 balles en éventail", balles: 5, cadence: 0, eventail: 1.5, degats: 1,
+    longueur: 30, largeur: 8, couleur: "#6b4a2b", prix: 3 },
+  { nom: "Sniper", desc: "1 balle très forte", balles: 1, cadence: 0, degats: 4,
+    longueur: 46, largeur: 4, couleur: "#3a4a3a", prix: 4 },
+  { nom: "Pistolet laser", desc: "Tir rapide, reste appuyé", balles: 1, cadence: 5, degats: 1,
+    longueur: 22, largeur: 6, couleur: "#2ac0e8", prix: 5 },
+  { nom: "Super blaster", desc: "3 balles fortes et rapides", balles: 3, cadence: 8, eventail: 0.8, degats: 2,
+    longueur: 36, largeur: 10, couleur: "#c03ae0", prix: 8 }
+];
+
+function afficherArmes() {
+  const liste = document.getElementById("listeArmes");
+  liste.textContent = "";
+  // Première ligne : revenir aux armes normales du jeu
+  const lignes = [{ nom: "Armes normales", desc: "Celles qu'on ramasse", normale: true }].concat(ARMES_BOUTIQUE);
+  lignes.forEach(function (a) {
+    const ligne = document.createElement("div");
+    ligne.className = "ligneArme";
+    ligne.appendChild(document.createTextNode(a.nom + " : " + a.desc));
+    const bouton = document.createElement("button");
+    const possedee = a.normale || armesAchetees.indexOf(a.nom) >= 0;
+    const equipee = a.normale ? armeEquipee === null : armeEquipee === a;
+    bouton.textContent = equipee ? "Équipée" : possedee ? "Équiper" : "💎 " + a.prix;
+    bouton.addEventListener("click", function () {
+      if (!possedee) {
+        if (gemmes < a.prix) {
+          bouton.textContent = "Pas assez de gemmes";
+          return;
+        }
+        gemmes -= a.prix;
+        armesAchetees.push(a.nom);
+        sauverBoutique();
+      }
+      armeEquipee = a.normale ? null : a;
+      montrer("ecranBoutique");
+      afficherArmes();
+    });
+    ligne.appendChild(bouton);
+    liste.appendChild(ligne);
+  });
+}
+
+// Quêtes : chacune donne des gemmes une seule fois
+const QUETES = [
+  { id: "zombies30", nom: "Battre 30 zombies dans une partie", gemmes: 1, ok: function () { return zombiesTues >= 30; } },
+  { id: "vague10", nom: "Atteindre la vague 10", gemmes: 2, ok: function () { return vague >= 10; } },
+  { id: "bombe", nom: "Utiliser la super bombe", gemmes: 1, ok: function () { return bombeUtilisee; } },
+  { id: "manoir", nom: "Entrer dans le manoir (vague 15)", gemmes: 3, ok: function () { return vague >= 15; } },
+  { id: "hardcore5", nom: "Atteindre la vague 5 en hardcore", gemmes: 3, ok: function () { return hardcore && vague >= 5; } }
+];
+let quetesFaites = [];
+try {
+  quetesFaites = JSON.parse(localStorage.getItem("quetesFaites")) || [];
+} catch (e) {}
+
+function verifierQuetes() {
+  QUETES.forEach(function (q) {
+    if (quetesFaites.indexOf(q.id) >= 0 || !q.ok()) return;
+    quetesFaites.push(q.id);
+    gemmes += q.gemmes;
+    sauverBoutique();
+    try {
+      localStorage.setItem("quetesFaites", JSON.stringify(quetesFaites));
+    } catch (e) {}
+    parler(joueurBulle, "Quête réussie ! +" + q.gemmes + " gemme(s)");
+  });
+}
+
+function afficherQuetes() {
+  const liste = document.getElementById("listeQuetes");
+  liste.textContent = "";
+  QUETES.forEach(function (q) {
+    const ligne = document.createElement("div");
+    const faite = quetesFaites.indexOf(q.id) >= 0;
+    ligne.textContent = (faite ? "✅ " : "⬜ ") + q.nom + " : 💎 " + q.gemmes;
+    liste.appendChild(ligne);
+  });
+}
+
+function montrerOnglet(nom) {
+  document.getElementById("listeTenues").style.display = nom === "tenues" ? "flex" : "none";
+  document.getElementById("listeArmes").style.display = nom === "armes" ? "flex" : "none";
+  document.getElementById("listeQuetes").style.display = nom === "quetes" ? "flex" : "none";
+  document.getElementById("tenueDepart").style.display = nom === "tenues" ? "inline-block" : "none";
+  if (nom === "armes") afficherArmes();
+  if (nom === "quetes") afficherQuetes();
+}
+document.getElementById("ongletQuetes").addEventListener("click", function () { montrerOnglet("quetes"); });
+
+document.getElementById("ongletTenues").addEventListener("click", function () { montrerOnglet("tenues"); });
+document.getElementById("ongletArmes").addEventListener("click", function () { montrerOnglet("armes"); });
+document.getElementById("echanger").addEventListener("click", function () {
+  if (trophees < 10) return;
+  trophees -= 10;
+  gemmes++;
+  sauverBoutique();
+  montrer("ecranBoutique");
+});
+
+const TENUE_DEPART = { corps: "#d32f2f", casque: "#6a5acd" };
+let tenueHeros = TENUE_DEPART;
+
+const COULEURS_TENUES = [
+  { nom: "rouge", hex: "#d32f2f" }, { nom: "bleu", hex: "#2a6fd0" },
+  { nom: "vert", hex: "#2e9e4f" }, { nom: "jaune", hex: "#e0b020" },
+  { nom: "violet", hex: "#8e44ad" }, { nom: "orange", hex: "#e67e22" },
+  { nom: "rose", hex: "#c0398a" }, { nom: "noir", hex: "#2a2a2a" }
+];
+let tenuesBoutique = [];
+
+const NINJAS = [
+  { nom: "Ninja noir", corps: "#222222", casque: "#222222", accent: "#d32f2f" },
+  { nom: "Ninja bleu", corps: "#1f3a6e", casque: "#1f3a6e", accent: "#ffd400" },
+  { nom: "Ninja vert", corps: "#1f5a35", casque: "#1f5a35", accent: "#ffffff" },
+  { nom: "Ninja rouge", corps: "#8a1f1f", casque: "#8a1f1f", accent: "#222222" }
+];
+const SAMOURAIS = [
+  { nom: "Samouraï rouge", corps: "#b02a30", casque: "#7a1a20", accent: "#e8c030" },
+  { nom: "Samouraï noir", corps: "#2a2a35", casque: "#15151c", accent: "#e8c030" },
+  { nom: "Samouraï bleu", corps: "#2a4f9a", casque: "#1b3166", accent: "#e8c030" },
+  { nom: "Samouraï doré", corps: "#c9a227", casque: "#8a6a10", accent: "#d32f2f" }
+];
+
+// 4 tenues au hasard (un ninja, un samouraï, deux autres), changées à chaque retour au menu
+function nouvellesTenues() {
+  const ninja = choisir(NINJAS);
+  const samourai = choisir(SAMOURAIS);
+  const corps = choisir(COULEURS_TENUES);
+  const casque = choisir(COULEURS_TENUES.filter(function (c) { return c !== corps; }));
+  const autre = choisir(NINJAS.concat(SAMOURAIS));
+  tenuesBoutique = [
+    { style: "ninja", corps: ninja.corps, casque: ninja.casque, accent: ninja.accent,
+      nom: ninja.nom, prix: 12 + Math.floor(Math.random() * 9) },
+    { style: "samourai", corps: samourai.corps, casque: samourai.casque, accent: samourai.accent,
+      nom: samourai.nom, prix: 15 + Math.floor(Math.random() * 11) },
+    { corps: corps.hex, casque: casque.hex,
+      nom: "Tenue " + corps.nom + " et " + casque.nom, prix: 5 + Math.floor(Math.random() * 11) },
+    { style: NINJAS.indexOf(autre) >= 0 ? "ninja" : "samourai", corps: autre.corps, casque: autre.casque,
+      accent: autre.accent, nom: autre.nom + " (bis)", prix: 14 + Math.floor(Math.random() * 11) }
+  ];
+}
+
+function afficherTenues() {
+  const liste = document.getElementById("listeTenues");
+  liste.textContent = "";
+  tenuesBoutique.forEach(function (t) {
+    const ligne = document.createElement("div");
+    ligne.className = "tenue";
+    const vue = document.createElement("canvas");
+    vue.width = 64;
+    vue.height = 90;
+    apercu(vue, t);
+    ligne.appendChild(vue);
+    ligne.appendChild(document.createTextNode(t.nom));
+    const achat = document.createElement("button");
+    achat.textContent = t.achetee ? "Mettre" : "Acheter (" + t.prix + ")";
+    achat.addEventListener("click", function () {
+      if (!t.achetee) {
+        if (pieces < t.prix) {
+          achat.textContent = "Pas assez de pièces";
+          return;
+        }
+        pieces -= t.prix;
+        t.achetee = true;
+        try {
+          localStorage.setItem("piecesZombies", pieces);
+        } catch (e) {}
+      }
+      tenueHeros = t;
+      montrer("ecranBoutique");
+      afficherTenues();
+    });
+    ligne.appendChild(achat);
+    liste.appendChild(ligne);
+  });
+}
+
+document.getElementById("tenueDepart").addEventListener("click", function () {
+  tenueHeros = TENUE_DEPART;
+});
+
+// Retour au menu après une défaite : nouvelles tenues dans la boutique
+function retourMenu() {
+  rejouer();
+  enAttente = true;
+  nouvellesTenues();
+  montrer("ecranMenu");
+  accueil.style.display = "flex";
+}
+
+boutonMenu.addEventListener("click", retourMenu);
+document.getElementById("boutonPauseMenu").addEventListener("click", retourMenu);
+
+// Bouton pause : visible seulement pendant la partie
+const boutonPause = document.getElementById("boutonPause");
+boutonPause.addEventListener("click", function () {
+  enPause = true;
+  boutonPause.blur();
+  document.getElementById("pause").style.display = "flex";
+});
+document.getElementById("boutonReprendre").addEventListener("click", function () {
+  enPause = false;
+  document.getElementById("pause").style.display = "none";
+});
+document.getElementById("boutonLobby").addEventListener("click", retourMenu);
+
+// Après la vague 50 : continuer au niveau suivant
+document.getElementById("boutonContinuer").addEventListener("click", function () {
+  niveau++;
+  vague = 0;
+  victoire = false;
+  confettis = [];
+  animNiveau = 150;
+  pause = 0;
+  document.getElementById("victoire").style.display = "none";
+  nouvelleVague();
+});
+
+nouvellesTenues();
+montrer("ecranMenu");
+
 function boucle() {
+  boutonPause.style.display = (!enAttente && !finDuJeu && !victoire) ? "block" : "none";
   miseAJour();
   dessiner();
   requestAnimationFrame(boucle);
