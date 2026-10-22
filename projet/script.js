@@ -35,7 +35,7 @@ let pause = 0; // petite pause entre deux vagues
 let prochainZombie = 0;
 let finDuJeu = false;
 let enAttente = true; // vrai tant qu'on n'a pas cliqué sur Jouer
-let niveau = 1;       // on passe au niveau suivant après la vague 50
+let niveau = 1;       // on passe au niveau suivant après la vague 45
 let victoire = false; // vrai quand le niveau est terminé
 let enPause = false;  // vrai quand on a cliqué sur Pause
 let animNiveau = 0;   // temps restant de l'animation de début de niveau
@@ -58,17 +58,64 @@ let temps = 0;
 let audio = null;
 let sortieSon = null;     // réglage du volume général
 let volumeGeneral = 1;
+const AMPLIFICATION = 2.5; // tous les sons sont 2,5 fois plus forts (le curseur Son à 100 %)
 
 function initAudio() {
   if (!audio) {
     try {
       audio = new AudioContext();
       sortieSon = audio.createGain();
-      sortieSon.gain.value = volumeGeneral;
-      sortieSon.connect(audio.destination);
+      sortieSon.gain.value = volumeGeneral * AMPLIFICATION;
+      // Un compresseur évite que le son grésille quand il est fort
+      const compresseur = audio.createDynamicsCompressor();
+      sortieSon.connect(compresseur);
+      compresseur.connect(audio.destination);
     } catch (e) {}
   }
   if (audio && audio.state === "suspended") audio.resume();
+  demarrerMusique();
+}
+
+// Le navigateur n'autorise le son qu'après un clic : la musique démarre au premier clic, même dans le menu
+document.addEventListener("click", initAudio);
+
+// Musique sinistre en boucle : un bourdonnement grave qui gonfle et dégonfle,
+// et de longues notes tristes et lentes qui reviennent au hasard.
+let musiqueLancee = false;
+function demarrerMusique() {
+  if (!audio || musiqueLancee) return;
+  musiqueLancee = true;
+  const filtre = audio.createBiquadFilter(); // adoucit le son pour qu'il reste sourd
+  filtre.type = "lowpass";
+  filtre.frequency.value = 220;
+  const volumeDrone = audio.createGain();
+  volumeDrone.gain.value = 0.22;
+  filtre.connect(volumeDrone);
+  volumeDrone.connect(sortieSon);
+  [[55, "sine"], [55.5, "sawtooth"], [82.4, "triangle"]].forEach(function (n) {
+    const osc = audio.createOscillator();
+    osc.type = n[1];
+    osc.frequency.value = n[0];
+    osc.connect(filtre);
+    osc.start();
+  });
+  // Un très lent va-et-vient du volume : le bourdonnement respire (10 secondes par respiration)
+  const lent = audio.createOscillator();
+  const profondeur = audio.createGain();
+  lent.frequency.value = 0.1;
+  profondeur.gain.value = 0.1;
+  lent.connect(profondeur);
+  profondeur.connect(volumeDrone.gain);
+  lent.start();
+  // Les notes tristes : gamme sombre (ré mineur avec un mi bémol qui fait peur)
+  const NOTES_SOMBRES = [147, 155, 175, 196, 220, 233, 294];
+  setInterval(function () {
+    if (!audio || audio.state !== "running") return;
+    const f = NOTES_SOMBRES[Math.floor(Math.random() * NOTES_SOMBRES.length)];
+    note(f, 0, 3.5, "sine", 0.25);
+    note(f / 2, 0, 3.5, "triangle", 0.15);
+    if (Math.random() < 0.25) note(f * 2.12, 0.6, 2.5, "sine", 0.08); // une note aiguë qui grince un peu
+  }, 3000);
 }
 
 // Joue une note : fréquence, moment de départ (en secondes), durée, forme, volume
@@ -136,6 +183,7 @@ document.addEventListener("keyup", function (e) {
 });
 
 function tirer() {
+  if (modeHistoire) return; // dans la forêt, c'est tirerForet qui tire
   if (finDuJeu || enAttente || victoire || enPause) return;
   const arme = armeActive();
   recharge = arme.cadence;
@@ -159,6 +207,21 @@ function tirer() {
 let xp = 0;
 let niveauJoueur = 1;
 
+// Le niveau du héros est gardé dans le navigateur, même après avoir perdu ou fermé la page
+function sauverNiveauHeros() {
+  try {
+    localStorage.setItem("niveauHerosZombies", JSON.stringify({ niveau: niveauJoueur, xp: xp }));
+  } catch (e) {}
+}
+
+try {
+  const sauveHeros = JSON.parse(localStorage.getItem("niveauHerosZombies"));
+  if (sauveHeros && sauveHeros.niveau >= 1) {
+    niveauJoueur = Math.floor(sauveHeros.niveau);
+    xp = Math.max(0, sauveHeros.xp || 0);
+  }
+} catch (e) {}
+
 function xpPourNiveauSuivant() {
   return niveauJoueur * 10;
 }
@@ -176,6 +239,7 @@ function gagnerXp(n) {
     animMontee = 40;
     parler(joueurBulle, "Niveau " + niveauJoueur + " ! Je suis plus fort !");
   }
+  sauverNiveauHeros();
 }
 
 // L'arme de la boutique (si on en a équipé une), sinon celle ramassée sur le chemin
@@ -229,10 +293,15 @@ function lancerBombe() {
   parler(joueurBulle, "Boum ! Plus personne !");
 }
 
+// Pour gagner : 45 vagues au level 1, puis une vague de plus à chaque victoire (46, 47...)
+function vagueObjectif() {
+  return 44 + niveau;
+}
+
 function nouvelleVague() {
   vague++;
   if (vague % 3 === 0) nouvelAllie();
-  if (vague === 6) {
+  if (vague % 6 === 0 && !bombeItem && !bombeDispo) { // une bombe toutes les 6 vagues
     bombeItem = { x: 80 + Math.random() * (canvas.width - 160), y: -30 };
     parler(joueurBulle, "Une bombe arrive du ciel !");
   }
@@ -268,17 +337,20 @@ function tenueAleatoire(boss) {
 }
 
 function nouveauZombie(boss) {
-  // Vague 50 : le roi squelette. À partir de la vague 15 (le manoir) : des squelettes qui tirent.
-  const roi = boss && vague === 50;
+  // Dernière vague avec un boss avant la victoire : le roi squelette. À partir de la vague 15 (le manoir) : des squelettes qui tirent.
+  const roi = boss && vague === vagueObjectif() - (vagueObjectif() % 2);
   // Dans le manoir, 3 monstres sur 10 sont des chevaliers noirs à cheval qui chargent
   const chevalier = !boss && vague >= 15 && !hardcore && Math.random() < 0.3;
   // Dès la vague 7, 3 monstres sur 10 sont des squelettes en feu qui lancent des bombes
   const feu = !boss && vague >= 7 && !hardcore && !chevalier && Math.random() < 0.3;
   const sbire = !boss && vague >= 15 && !hardcore && !chevalier && !feu;
   // Mode hardcore : tous les monstres sont des fantômes (sauf le roi squelette)
-  const type = roi || sbire || feu ? "squelette" : chevalier ? "chevalier" : hardcore ? "fantome" : boss ? TYPES_BOSS[(vague / 2 - 1) % TYPES_BOSS.length] : "zombie";
+  // Vague 10 (mode normal) : le boss kraken, énorme, qui invoque des mini krakens
+  const kraken = boss && vague === 10 && !hardcore;
+  const type = kraken ? "kraken" : roi || sbire || feu ? "squelette" : chevalier ? "chevalier" : hardcore ? "fantome" : boss ? TYPES_BOSS[(vague / 2 - 1) % TYPES_BOSS.length] : "zombie";
   // plus de vie à chaque vague, deux fois plus en hardcore, et les chevaliers sont solides
-  const pvDepart = (boss ? 6 + vague * 3 : Math.ceil(vague * 0.7) + (niveau - 1)) * (hardcore ? 2 : 1) * (chevalier ? 2 : 1);
+  const pvBase = kraken ? 100 : (boss ? 6 + vague * 3 : Math.ceil(vague * 0.7) + (niveau - 1)) * (hardcore ? 2 : 1) * (chevalier ? 2 : 1);
+  const pvDepart = pvBase;
   zombies.push({
     type: type,
     tireur: roi || sbire,
@@ -288,16 +360,18 @@ function nouveauZombie(boss) {
     tirDans: 60 + Math.random() * 80,
     tenue: tenueAleatoire(boss),
     hauteurVoix: 0.8 + Math.random() * 0.4,
-    x: 20 + Math.random() * (canvas.width - 70),
-    y: boss ? -100 : -50,
-    largeur: boss ? 60 : chevalier ? 40 : 30,
-    hauteur: boss ? 100 : chevalier ? 64 : 50,
-    echelle: boss ? 2 : 1,
+    kraken: kraken,
+    invoqueDans: 120,
+    x: kraken ? (canvas.width - 200) / 2 : 20 + Math.random() * (canvas.width - 70),
+    y: kraken ? -170 : boss ? -100 : -50,
+    largeur: kraken ? 200 : boss ? 60 : chevalier ? 40 : 30,
+    hauteur: kraken ? 160 : boss ? 100 : chevalier ? 64 : 50,
+    echelle: kraken ? 1 : boss ? 2 : 1,
     boss: boss,
     pv: pvDepart,
     pvMax: pvDepart,
     // plus rapide à chaque vague, et une fois et demie plus rapide en hardcore
-    vitesse: (roi ? 0.6 : boss ? 1 + vague * 0.05 : 1.8 + Math.random() * 0.8 + vague * 0.2) * (hardcore ? 1.5 : 1) * (chevalier ? 1.6 : 1),
+    vitesse: (roi ? 0.6 : boss ? 1 + vague * 0.05 : 1.8 + Math.random() * 0.8 + vague * 0.2) * (hardcore ? 1.5 : 1) * (chevalier ? 1.6 : 1) * 0.6 * (hardcore ? 1 : 0.5), // monstres plus lents, encore plus en mode normal
     phase: Math.random() * 10,     // pour que chaque zombie ait son propre rythme
     balancement: 0.5 + Math.random() * 0.8
   });
@@ -307,6 +381,24 @@ function nouveauZombie(boss) {
   else if (boss) parler(nouveau, PHRASES_TYPE_BOSS[type]);
   else if (chevalier && Math.random() < 0.5) parler(nouveau, "Hiii-ha ! À l'attaque !");
   else if (Math.random() < 0.25) parler(nouveau, choisir(PHRASES_ZOMBIES));
+}
+
+// Le kraken invoque un mini kraken près de ses tentacules
+function nouveauMiniKraken(kraken) {
+  zombies.push({
+    type: "minikraken",
+    tireur: false, roi: false, feu: false, boss: false, kraken: false,
+    bombeDans: 999, tirDans: 999,
+    tenue: tenueAleatoire(false),
+    hauteurVoix: 1.3,
+    x: kraken.x + 10 + Math.random() * (kraken.largeur - 50),
+    y: kraken.y + kraken.hauteur * 0.7,
+    largeur: 40, hauteur: 40, echelle: 1,
+    pv: 2, pvMax: 2,
+    vitesse: 0.9,
+    phase: Math.random() * 10,
+    balancement: 0.8 + Math.random() * 0.8
+  });
 }
 
 // Un squelette lance une boule de feu vers le héros (bleue et géante pour le roi)
@@ -374,9 +466,8 @@ function miseAJour() {
   if (touches["ArrowLeft"] && joueur.x > 0) joueur.x -= joueur.vitesse;
   if (touches["ArrowRight"] && joueur.x < canvas.width - joueur.largeur) joueur.x += joueur.vitesse;
 
-  // Tir automatique en gardant espace appuyé (AK-47 et mitraillette)
+  // Un seul tir par appui sur espace (plus de tir automatique)
   recharge--;
-  if (touches["Space"] && armeActive().cadence > 0 && recharge <= 0) tirer();
 
   balles.forEach(function (b) {
     b.y -= 10;
@@ -416,16 +507,16 @@ function miseAJour() {
       zombiesAApparaitre--;
       // Toutes les 2 vagues, le dernier à arriver est un gros boss
       nouveauZombie(vague % 2 === 0 && zombiesAApparaitre === 0);
-      prochainZombie = 30 - Math.min(vague, 20);
+      prochainZombie = 12; // les monstres arrivent vite, donc la vague est vite finie
     }
   } else if (zombies.length === 0) {
     if (pause === 0) gagnerTrophees(5); // 5 trophées à chaque vague terminée
-    if (vague >= 50) {
+    if (vague >= vagueObjectif()) { // dernière vague terminée : la partie est gagnée
       finirNiveau();
       return;
     }
     pause++;
-    if (pause > 50) {
+    if (pause > 25) { // courte pause entre deux vagues
       pause = 0;
       nouvelleVague();
     }
@@ -434,10 +525,15 @@ function miseAJour() {
   // Les zombies avancent en se balançant
   zombies.forEach(function (z) {
     z.y += z.vitesse;
-    // Il se dirige vers le héros
-    const cible = joueur.x + joueur.largeur / 2 - z.largeur / 2;
-    if (z.x < cible - 1) z.x += z.vitesse * 0.6;
-    else if (z.x > cible + 1) z.x -= z.vitesse * 0.6;
+    if (z.kraken && z.y > 0) { // le kraken invoque un mini kraken de temps en temps (6 au maximum)
+      z.invoqueDans--;
+      const minis = zombies.filter(function (m) { return m.type === "minikraken"; }).length;
+      if (z.invoqueDans <= 0 && minis < 6) {
+        z.invoqueDans = 130;
+        nouveauMiniKraken(z);
+      }
+    }
+    // Il ne suit plus le héros : il descend tout droit en se balançant
     z.x += Math.sin((temps + z.phase * 10) / 15) * z.balancement * 0.5;
     z.x = Math.max(0, Math.min(canvas.width - z.largeur, z.x));
   });
@@ -691,7 +787,8 @@ const PHRASES_HEROS = ["Prends ça !", "Pas touche !", "Reste là !", "Je n'ai p
 const PHRASES_ZOMBIES = ["Grrr !", "Hé, attends-moi !", "J'ai faim...", "Rrrah !", "Je t'arrive !"];
 const PHRASES_BOSS = ["Je suis le chef !", "Tu ne m'arrêteras pas !"];
 const PHRASES_TYPE_BOSS = {
-  fantome: "Ouuuh ! Je suis le roi des fantômes !",
+  kraken: "Glou glou ! Je suis le Kraken géant !",
+  fantome:"Ouuuh ! Je suis le roi des fantômes !",
   citrouille: "Bouh ! Je suis la citrouille !",
   squelette: "Clac clac ! Squelette !",
   zombie: "Je suis le grand chef !"
@@ -700,8 +797,7 @@ const joueurBulle = { bulle: null };
 
 function parler(qui, texte, delai) {
   qui.bulle = { texte: texte, reste: 110, delai: delai || 0 };
-  const profil = qui === joueurBulle ? "heros" : qui === mevha ? "robot" : qui.couleur ? "allie" : qui.boss ? "boss" : "zombie";
-  voix(texte, profil, qui.hauteurVoix || 1, (delai || 0) / 60);
+  // Plus de petit bruit de voix : les phrases s'affichent seulement dans les bulles
 }
 
 function choisir(liste) {
@@ -745,9 +841,9 @@ function dessinerFantome(z) {
   ctx.translate(z.x, z.y + flotte);
   ctx.scale(z.echelle, z.echelle);
   ctx.globalAlpha = 0.65 + Math.sin(temps / 15 + z.phase) * 0.15;
-  ctx.shadowColor = z.boss ? "#ff6060" : "#9cf";
+  ctx.shadowColor = z.boss ? "#ff6060" : "#2a7bff";
   ctx.shadowBlur = 15;
-  ctx.fillStyle = "#eef2ff";
+  ctx.fillStyle = z.boss ? "#eef2ff" : "#5aa0ff"; // fantômes bleus
   ctx.beginPath(); // tête ronde, corps, bas en vagues
   ctx.moveTo(0, 50);
   ctx.lineTo(0, 15);
@@ -916,7 +1012,96 @@ function brasFantome(z) {
 }
 
 // Dessine un zombie ou un boss avec ses vêtements au hasard
+// Le kraken géant (200 x 160) : tête violette, gros yeux fâchés et tentacules qui ondulent
+function dessinerKraken(z) {
+  ctx.save();
+  ctx.translate(z.x, z.y);
+  ctx.lineCap = "round";
+  for (let i = 0; i < 7; i++) { // tentacules
+    const x0 = 22 + i * 26;
+    ctx.strokeStyle = i % 2 ? "#6a3a9a" : "#5a2a8a";
+    ctx.lineWidth = 16;
+    ctx.beginPath();
+    ctx.moveTo(x0, 80);
+    ctx.bezierCurveTo(x0 + Math.sin(temps / 10 + i) * 18, 105, x0 - Math.sin(temps / 10 + i) * 18, 130, x0 + Math.sin(temps / 8 + i * 2) * 14, 158);
+    ctx.stroke();
+    ctx.fillStyle = "#c9a0e8"; // ventouses
+    ctx.beginPath();
+    ctx.arc(x0, 112, 3, 0, Math.PI * 2);
+    ctx.arc(x0, 134, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = "#5a2a8a"; // grosse tête
+  ctx.beginPath();
+  ctx.ellipse(100, 55, 92, 58, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#7a4ab0"; // taches claires
+  ctx.beginPath();
+  ctx.arc(60, 28, 9, 0, Math.PI * 2);
+  ctx.arc(140, 24, 7, 0, Math.PI * 2);
+  ctx.arc(104, 12, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#fff"; // yeux
+  ctx.beginPath();
+  ctx.arc(68, 58, 18, 0, Math.PI * 2);
+  ctx.arc(132, 58, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#e22";
+  ctx.beginPath();
+  ctx.arc(70, 62, 9, 0, Math.PI * 2);
+  ctx.arc(130, 62, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#220a38"; // sourcils fâchés
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(46, 34); ctx.lineTo(86, 46);
+  ctx.moveTo(154, 34); ctx.lineTo(114, 46);
+  ctx.stroke();
+  ctx.fillStyle = "#220a38"; // bouche
+  ctx.beginPath();
+  ctx.arc(100, 90, 14, 0, Math.PI);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Un mini kraken (40 x 40)
+function dessinerMiniKraken(z) {
+  ctx.save();
+  ctx.translate(z.x, z.y);
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "#a05ad0";
+  ctx.lineWidth = 5;
+  for (let i = 0; i < 4; i++) {
+    const x0 = 8 + i * 8;
+    ctx.beginPath();
+    ctx.moveTo(x0, 22);
+    ctx.quadraticCurveTo(x0 + Math.sin(temps / 6 + z.phase + i) * 6, 32, x0 + Math.sin(temps / 5 + i) * 5, 40);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#b878e0";
+  ctx.beginPath();
+  ctx.arc(20, 16, 15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(14, 16, 5, 0, Math.PI * 2);
+  ctx.arc(26, 16, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#111";
+  ctx.fillRect(13, 15, 3, 3);
+  ctx.fillRect(25, 15, 3, 3);
+  ctx.restore();
+}
+
 function dessinerZombie(z) {
+  if (z.type === "kraken") {
+    dessinerKraken(z);
+    return;
+  }
+  if (z.type === "minikraken") {
+    dessinerMiniKraken(z);
+    return;
+  }
   if (z.type === "fantome") {
     dessinerFantome(z);
     return;
@@ -1487,9 +1672,9 @@ function dessiner() {
 
   // Balles
   balles.forEach(function (b) {
-    ctx.fillStyle = "rgba(255, 200, 0, 0.3)"; // traînée lumineuse
+    ctx.fillStyle = "rgba(255, 0, 0, 0.35)"; // traînée lumineuse rouge
     ctx.fillRect(b.x - 3, b.y, 6, 24);
-    ctx.fillStyle = "#fff6a0";
+    ctx.fillStyle = "#ff2020";
     ctx.fillRect(b.x - 2, b.y, 4, 10);
   });
 
@@ -1683,8 +1868,7 @@ function rejouer() {
   bombeItem = null;
   bombeDispo = false;
   bombeUtilisee = false;
-  xp = 0;
-  niveauJoueur = 1;
+  // Le niveau du héros (niveauJoueur et xp) n'est plus remis à zéro : il est gardé
   confettis = [];
   animMontee = 0;
   animNiveau = 0;
@@ -1709,7 +1893,124 @@ function rejouer() {
 boutonRejouer.addEventListener("click", rejouer);
 
 // ----- Menu : jouer, paramètres, boutique -----
-const ecrans = ["ecranMenu", "ecranParametres", "ecranBoutique"];
+const ecrans = ["ecranMenu", "ecranHistoire", "ecranParametres", "ecranTouches", "ecranBoutique"];
+
+// ----- Touches : on peut changer les touches du jeu -----
+// Le jeu garde ses touches d'origine en interne : quand on appuie sur une touche choisie,
+// on envoie au jeu la touche d'origine qui correspond.
+const ACTIONS_TOUCHES = [
+  { id: "gauche", nom: "Gauche / tourner à gauche", defaut: "ArrowLeft" },
+  { id: "droite", nom: "Droite / tourner à droite", defaut: "ArrowRight" },
+  { id: "avancer", nom: "Avancer (mode histoire)", defaut: "ArrowUp" },
+  { id: "reculer", nom: "Reculer (mode histoire)", defaut: "ArrowDown" },
+  { id: "tirer", nom: "Tirer", defaut: "Space" },
+  { id: "bombe", nom: "Super bombe", defaut: "KeyB" },
+  { id: "pleinEcran", nom: "Plein écran", defaut: "KeyF" }
+];
+let touchesChoisies = {};
+let actionEnAttente = null; // l'action qu'on est en train de changer
+
+try {
+  const sauveTouches = JSON.parse(localStorage.getItem("touchesZombies"));
+  if (sauveTouches && typeof sauveTouches === "object") touchesChoisies = sauveTouches;
+} catch (e) {}
+
+function codeDe(action) {
+  return touchesChoisies[action.id] || action.defaut;
+}
+
+// Le jeu retient la touche par sa place sur le clavier (comme sur un clavier qwerty).
+// Pour l'affichage, on garde la lettre qui est vraiment écrite sur ta touche (azerty : A, Z, Q, W...).
+let nomsTouches = {};
+try {
+  const sauveNoms = JSON.parse(localStorage.getItem("nomsTouchesZombies"));
+  if (sauveNoms && typeof sauveNoms === "object") nomsTouches = sauveNoms;
+} catch (e) {}
+
+function nomDeTouche(code) {
+  if (nomsTouches[code]) return nomsTouches[code];
+  const noms = { ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", Space: "Espace", ShiftLeft: "Maj", ShiftRight: "Maj", Enter: "Entrée" };
+  if (noms[code]) return noms[code];
+  if (code.indexOf("Key") === 0) return code.slice(3);
+  if (code.indexOf("Digit") === 0) return code.slice(5);
+  return code;
+}
+
+function afficherTouches() {
+  const liste = document.getElementById("listeTouches");
+  liste.textContent = "";
+  ACTIONS_TOUCHES.forEach(function (action) {
+    const ligne = document.createElement("div");
+    ligne.className = "ligneArme";
+    ligne.appendChild(document.createTextNode(action.nom));
+    const bouton = document.createElement("button");
+    bouton.className = "moyen";
+    bouton.textContent = actionEnAttente === action ? "Appuie sur une touche..." : nomDeTouche(codeDe(action));
+    bouton.addEventListener("click", function () {
+      actionEnAttente = action;
+      document.getElementById("messageTouches").textContent = "Appuie sur la nouvelle touche (Échap pour annuler).";
+      afficherTouches();
+    });
+    ligne.appendChild(bouton);
+    liste.appendChild(ligne);
+  });
+}
+
+function gererTouche(e) {
+  if (!e.isTrusted) return; // les touches envoyées par le jeu passent sans changement
+  const message = document.getElementById("messageTouches");
+  if (e.type === "keydown" && actionEnAttente) { // on choisit la nouvelle touche
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.code !== "Escape") {
+      const prise = ACTIONS_TOUCHES.find(function (a) { return a !== actionEnAttente && codeDe(a) === e.code; });
+      if (prise) {
+        message.textContent = "Cette touche sert déjà pour : " + prise.nom;
+      } else {
+        touchesChoisies[actionEnAttente.id] = e.code;
+        if (e.key.length === 1 && e.key !== " ") nomsTouches[e.code] = e.key.toUpperCase(); // la vraie lettre de la touche
+        message.textContent = "Touche changée !";
+        try {
+          localStorage.setItem("touchesZombies", JSON.stringify(touchesChoisies));
+          localStorage.setItem("nomsTouchesZombies", JSON.stringify(nomsTouches));
+        } catch (err) {}
+      }
+    }
+    actionEnAttente = null;
+    afficherTouches();
+    return;
+  }
+  const action = ACTIONS_TOUCHES.find(function (a) { return codeDe(a) === e.code; });
+  if (action && action.defaut !== e.code) { // une touche choisie : on envoie la touche d'origine
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    document.dispatchEvent(new KeyboardEvent(e.type, { code: action.defaut, key: action.defaut, repeat: e.repeat, bubbles: true, cancelable: true }));
+    return;
+  }
+  const ancienne = ACTIONS_TOUCHES.find(function (a) { return a.defaut === e.code && codeDe(a) !== e.code; });
+  if (!action && ancienne) { // l'ancienne touche ne sert plus
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+}
+window.addEventListener("keydown", gererTouche, true);
+window.addEventListener("keyup", gererTouche, true);
+
+document.getElementById("boutonTouches").addEventListener("click", function () {
+  document.getElementById("messageTouches").textContent = "Clique sur une touche pour la changer.";
+  montrer("ecranTouches");
+  afficherTouches();
+});
+document.getElementById("touchesDefaut").addEventListener("click", function () {
+  touchesChoisies = {};
+  actionEnAttente = null;
+  try { localStorage.removeItem("touchesZombies"); } catch (err) {}
+  afficherTouches();
+});
+document.getElementById("retourTouches").addEventListener("click", function () {
+  actionEnAttente = null;
+  montrer("ecranParametres");
+});
 
 function montrer(id) {
   ecrans.forEach(function (e) {
@@ -1737,6 +2038,20 @@ document.getElementById("boutonHardcore").addEventListener("click", function () 
   lancerPartie(true);
 });
 
+// Plein écran : bouton du menu, ou touche F pendant le jeu
+function basculerPleinEcran() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen();
+}
+document.getElementById("boutonPleinEcran").addEventListener("click", basculerPleinEcran);
+document.addEventListener("keydown", function (e) {
+  if (e.code === "KeyF") basculerPleinEcran();
+});
+
+document.getElementById("boutonHistoire").addEventListener("click", function () {
+  montrer("ecranHistoire");
+});
+
 document.getElementById("boutonParametres").addEventListener("click", function () {
   montrer("ecranParametres");
 });
@@ -1752,10 +2067,11 @@ document.querySelectorAll(".retour").forEach(function (b) {
 // Réglage du son et de la luminosité
 document.getElementById("reglageSon").addEventListener("input", function (e) {
   volumeGeneral = e.target.value / 100;
-  if (sortieSon) sortieSon.gain.value = volumeGeneral;
+  if (sortieSon) sortieSon.gain.value = volumeGeneral * AMPLIFICATION;
 });
 document.getElementById("reglageLumiere").addEventListener("input", function (e) {
   canvas.style.filter = "brightness(" + e.target.value + "%)";
+  document.getElementById("accueil").style.filter = "brightness(" + e.target.value + "%)"; // aussi sur l'accueil
 });
 
 // ----- Pièces et tenues -----
@@ -1797,13 +2113,13 @@ function gagnerTrophees(n) {
 // Armes de la boutique : on les achète avec des gemmes
 const ARMES_BOUTIQUE = [
   { nom: "Fusil à pompe", desc: "5 balles en éventail", balles: 5, cadence: 0, eventail: 1.5, degats: 1,
-    longueur: 30, largeur: 8, couleur: "#6b4a2b", prix: 3 },
+    longueur: 30, largeur: 8, couleur: "#6b4a2b", prix: 300 },
   { nom: "Sniper", desc: "1 balle très forte", balles: 1, cadence: 0, degats: 4,
-    longueur: 46, largeur: 4, couleur: "#3a4a3a", prix: 4 },
+    longueur: 46, largeur: 4, couleur: "#3a4a3a", prix: 400 },
   { nom: "Pistolet laser", desc: "Tir rapide, reste appuyé", balles: 1, cadence: 5, degats: 1,
-    longueur: 22, largeur: 6, couleur: "#2ac0e8", prix: 5 },
+    longueur: 22, largeur: 6, couleur: "#2ac0e8", prix: 500 },
   { nom: "Super blaster", desc: "3 balles fortes et rapides", balles: 3, cadence: 8, eventail: 0.8, degats: 2,
-    longueur: 36, largeur: 10, couleur: "#c03ae0", prix: 8 }
+    longueur: 36, largeur: 10, couleur: "#c03ae0", prix: 800 }
 ];
 
 function afficherArmes() {
@@ -1928,17 +2244,57 @@ function nouvellesTenues() {
   const autre = choisir(NINJAS.concat(SAMOURAIS));
   tenuesBoutique = [
     { style: "ninja", corps: ninja.corps, casque: ninja.casque, accent: ninja.accent,
-      nom: ninja.nom, prix: 12 + Math.floor(Math.random() * 9) },
+      nom: ninja.nom, prix: (12 + Math.floor(Math.random() * 9)) * 100 },
     { style: "samourai", corps: samourai.corps, casque: samourai.casque, accent: samourai.accent,
-      nom: samourai.nom, prix: 15 + Math.floor(Math.random() * 11) },
+      nom: samourai.nom, prix: (15 + Math.floor(Math.random() * 11)) * 100 },
     { corps: corps.hex, casque: casque.hex,
-      nom: "Tenue " + corps.nom + " et " + casque.nom, prix: 5 + Math.floor(Math.random() * 11) },
+      nom: "Tenue " + corps.nom + " et " + casque.nom, prix: (5 + Math.floor(Math.random() * 11)) * 100 },
     { style: NINJAS.indexOf(autre) >= 0 ? "ninja" : "samourai", corps: autre.corps, casque: autre.casque,
-      accent: autre.accent, nom: autre.nom + " (bis)", prix: 14 + Math.floor(Math.random() * 11) }
+      accent: autre.accent, nom: autre.nom + " (bis)", prix: (14 + Math.floor(Math.random() * 11)) * 100 }
   ];
 }
 
+// La boutique change toutes les heures : les tenues et l'heure du dernier changement sont gardées
+const UNE_HEURE = 60 * 60 * 1000;
+let boutiqueHeure = 0;
+
+function sauverTenues(nouvelles) {
+  if (nouvelles) boutiqueHeure = Date.now();
+  try {
+    localStorage.setItem("boutiqueTenues", JSON.stringify(tenuesBoutique));
+    localStorage.setItem("boutiqueHeure", boutiqueHeure);
+  } catch (e) {}
+}
+
+function chargerBoutique() {
+  try {
+    const heure = Number(localStorage.getItem("boutiqueHeure"));
+    const liste = JSON.parse(localStorage.getItem("boutiqueTenues"));
+    if (heure && Date.now() - heure < UNE_HEURE && Array.isArray(liste) && liste.length
+        && liste.every(function (t) { return t.prix >= 100; })) { // les anciennes tenues à petit prix sont remplacées
+      boutiqueHeure = heure;
+      tenuesBoutique = liste;
+      return;
+    }
+  } catch (e) {}
+  nouvellesTenues();
+  sauverTenues(true);
+}
+
+function minutesAvantChangement() {
+  return Math.max(0, Math.ceil((boutiqueHeure + UNE_HEURE - Date.now()) / 60000));
+}
+
+// Toutes les 30 secondes, on regarde si une heure est passée
+setInterval(function () {
+  if (Date.now() - boutiqueHeure < UNE_HEURE) return;
+  nouvellesTenues();
+  sauverTenues(true);
+  if (document.getElementById("ecranBoutique").style.display === "flex") afficherTenues();
+}, 30000);
+
 function afficherTenues() {
+  document.getElementById("renouvellement").textContent = "Nouvelles tenues dans " + minutesAvantChangement() + " min";
   const liste = document.getElementById("listeTenues");
   liste.textContent = "";
   tenuesBoutique.forEach(function (t) {
@@ -1963,6 +2319,7 @@ function afficherTenues() {
         try {
           localStorage.setItem("piecesZombies", pieces);
         } catch (e) {}
+        sauverTenues(false);
       }
       tenueHeros = t;
       montrer("ecranBoutique");
@@ -1977,11 +2334,13 @@ document.getElementById("tenueDepart").addEventListener("click", function () {
   tenueHeros = TENUE_DEPART;
 });
 
-// Retour au menu après une défaite : nouvelles tenues dans la boutique
+// Retour au menu (la boutique ne change plus ici : seulement toutes les heures)
 function retourMenu() {
   rejouer();
   enAttente = true;
-  nouvellesTenues();
+  modeHistoire = false;
+  pauseHistoire = false;
+  document.getElementById("pause").style.display = "none";
   montrer("ecranMenu");
   accueil.style.display = "flex";
 }
@@ -1998,6 +2357,7 @@ boutonPause.addEventListener("click", function () {
 });
 document.getElementById("boutonReprendre").addEventListener("click", function () {
   enPause = false;
+  pauseHistoire = false;
   document.getElementById("pause").style.display = "none";
 });
 document.getElementById("boutonLobby").addEventListener("click", retourMenu);
@@ -2014,13 +2374,993 @@ document.getElementById("boutonContinuer").addEventListener("click", function ()
   nouvelleVague();
 });
 
-nouvellesTenues();
+chargerBoutique();
 montrer("ecranMenu");
+
+// ----- Mode histoire : la forêt (étape 1) -----
+let modeHistoire = false;
+let pauseHistoire = false; // vrai quand on a cliqué sur Pause dans le mode histoire
+
+document.getElementById("boutonPauseHistoire").addEventListener("click", function () {
+  pauseHistoire = true;
+  this.blur();
+  document.getElementById("pause").style.display = "flex"; // même menu de pause que le jeu normal
+});
+const TAILLE_CARTE = 3000; // la carte fait 3000 x 3000 (l'écran n'en montre qu'un morceau)
+const DEPART_FORET = { x: 985, y: 1000 }; // au milieu de la carte
+const heroForet = { x: DEPART_FORET.x, y: DEPART_FORET.y }; // coin en haut à gauche du héros (il fait 30 x 50)
+let tempsForet = 0;
+let marcheForet = 0;
+let angleForet = -Math.PI / 2; // direction du regard (au début : vers le haut de la carte)
+
+// Les arbres : x, y = pied du tronc, r = taille. Placés "au hasard" mais toujours pareil.
+const ARBRES = [];
+const COFFRES = [];
+const MAISON = { x: 1000, y: 300 }; // la maison de la famille, tout en haut de la carte
+let dansMaison = false;             // vrai quand le héros est entré
+// Les boss gardent la route vers la maison : il faut les battre pour ouvrir la porte
+const BOSS_DEPARTS = [
+  { nom: "Gardien de la forêt", x: 450, y: 700, pv: 15, couleur: "#6a3a8a" },
+  { nom: "Roi des zombies", x: 970, y: 440, pv: 25, couleur: "#8a2a2a" }
+];
+// Chapitre 2 : après la maison, la forêt devient rouge et les boss sont plus forts
+const BOSS_CHAPITRE2 = [
+  { nom: "Le Géant des ombres", x: 450, y: 700, pv: 25, couleur: "#2a2a6a" },
+  { nom: "Le Roi du brouillard", x: 970, y: 440, pv: 40, couleur: "#1a5a5a" }
+];
+// Chapitre 4 : la ville, avec 3 boss dont le chef des zombies
+const BOSS_CHAPITRE4 = [
+  { nom: "Le Brute", x: 450, y: 700, pv: 30, couleur: "#4a4a4a" },
+  { nom: "La Reine des zombies", x: 1600, y: 800, pv: 40, couleur: "#8a2a6a" },
+  { nom: "Le Chef des zombies", x: 970, y: 440, pv: 60, couleur: "#1a1a1a" }
+];
+// Chapitre 5 : le laboratoire, avec le boss final (mêmes endroits que la ville)
+const BOSS_CHAPITRE5 = [
+  { nom: "Le Robot-garde", x: 450, y: 700, pv: 40, couleur: "#6a7a8a" },
+  { nom: "La Mutante", x: 1600, y: 800, pv: 55, couleur: "#2a9a5a" },
+  { nom: "Le Docteur Zombie", x: 970, y: 440, pv: 80, couleur: "#e8e8f0" },
+  { nom: "Le Kraken géant", x: 1300, y: 1500, pv: 100, couleur: "#5a2a8a", kraken: true } // invoque des mini krakens
+];
+let chapitre = 1;
+(function () {
+  let graine = 12345;
+  function hasard() { // petit générateur de nombres au hasard
+    graine = (graine * 16807) % 2147483647;
+    return graine / 2147483647;
+  }
+  for (let i = 0; i < 200; i++) {
+    const a = { x: 30 + hasard() * (TAILLE_CARTE - 60), y: 60 + hasard() * (TAILLE_CARTE - 80), r: 24 + hasard() * 10 };
+    // On laisse une clairière vide autour du départ
+    if (Math.hypot(a.x - 1000, a.y - 1025) > 130) ARBRES.push(a);
+  }
+  // Les coffres : on enlève les arbres trop près pour qu'on puisse les atteindre
+  for (let i = 0; i < 5; i++) {
+    const c = { x: 80 + hasard() * (TAILLE_CARTE - 160), y: 100 + hasard() * (TAILLE_CARTE - 200), ouvert: false };
+    if (Math.hypot(c.x - 1000, c.y - 1025) < 200) { i--; continue; } // pas dans la clairière du départ
+    COFFRES.push(c);
+    for (let j = ARBRES.length - 1; j >= 0; j--) {
+      if (Math.hypot(ARBRES[j].x - c.x, ARBRES[j].y - c.y) < 70) ARBRES.splice(j, 1);
+    }
+  }
+  BOSS_DEPARTS.concat(BOSS_CHAPITRE4, BOSS_CHAPITRE5).forEach(function (b) { // et pas d'arbres là où les boss attendent
+    for (let j = ARBRES.length - 1; j >= 0; j--) {
+      if (Math.hypot(ARBRES[j].x - b.x, ARBRES[j].y - b.y) < 90) ARBRES.splice(j, 1);
+    }
+  });
+  // Pas d'arbres autour de la maison, pour qu'on puisse arriver à la porte
+  for (let j = ARBRES.length - 1; j >= 0; j--) {
+    if (Math.abs(ARBRES[j].x - MAISON.x) < 150 && Math.abs(ARBRES[j].y - MAISON.y - 40) < 130) ARBRES.splice(j, 1);
+  }
+  ARBRES.sort(function (a, b) { return a.y - b.y; });
+})();
+
+let armesPossedees = [0]; // inventaire : numéros des armes qu'on a (on commence avec le pistolet)
+let messageForet = "";
+let messageForetTemps = 0;
+
+function ouvrirCoffres() {
+  const cx = heroForet.x + 15;
+  const cy = heroForet.y + 50;
+  COFFRES.forEach(function (c) {
+    if (c.ouvert || Math.hypot(cx - c.x, cy - c.y) > 40) return;
+    c.ouvert = true;
+    const nouvelle = ARMES.findIndex(function (arme, i) { return armesPossedees.indexOf(i) < 0 && arme; });
+    if (nouvelle >= 0) {
+      armesPossedees.push(nouvelle); // l'arme va dans l'inventaire
+      niveauArme = nouvelle;
+      messageForet = "Coffre ouvert ! Nouvelle arme : " + ARMES[nouvelle].nom;
+    } else {
+      messageForet = "Coffre ouvert ! Tu as déjà toutes les armes.";
+    }
+    messageForetTemps = 180;
+    sauverHistoire();
+  });
+}
+
+// Zombies de la forêt : ils apparaissent de temps en temps et marchent vers le héros
+let zombiesForet = [];
+let ballesForet = [];
+let vieForet = 20;
+let prochainZombieForet = 300;
+let degatsPauseForet = 0;
+let flashForet = 0; // écran rouge quand le héros est touché
+let dirForet = { x: 0, y: -1 }; // direction dans laquelle regarde le héros
+
+function creerBossForet() {
+  (chapitre === 1 ? BOSS_DEPARTS : chapitre === 2 ? BOSS_CHAPITRE2 : chapitre === 4 ? BOSS_CHAPITRE4 : BOSS_CHAPITRE5).forEach(function (b) {
+    zombiesForet.push({ x: b.x, y: b.y, pv: b.pv, pvMax: b.pv, boss: true, nom: b.nom, couleur: b.couleur, kraken: !!b.kraken, invoqueDans: 100, reveille: false, marche: 0 });
+  });
+}
+
+function bossRestants() {
+  return zombiesForet.filter(function (z) { return z.boss; }).length;
+}
+
+function apparaitreZombieForet() {
+  const angle = Math.random() * Math.PI * 2;
+  const x = Math.max(20, Math.min(TAILLE_CARTE - 50, heroForet.x + Math.cos(angle) * 380));
+  const y = Math.max(20, Math.min(TAILLE_CARTE - 70, heroForet.y + Math.sin(angle) * 380));
+  if (bloqueParArbre(x + 15, y + 50)) return;
+  zombiesForet.push({ x: x, y: y, pv: 3, marche: 0 });
+}
+
+function tirerForet() {
+  const arme = ARMES[niveauArme];
+  for (let i = 0; i < arme.balles; i++) {
+    const decalage = (i - (arme.balles - 1) / 2) * 10;
+    ballesForet.push({
+      x: heroForet.x + 15 - dirForet.y * decalage,
+      y: heroForet.y + 25 + dirForet.x * decalage,
+      dx: dirForet.x * 8, dy: dirForet.y * 8, vie: 50
+    });
+  }
+}
+
+function miseAJourZombiesForet() {
+  prochainZombieForet--;
+  if (prochainZombieForet <= 0) {
+    prochainZombieForet = (240 + Math.random() * 240) * (chapitre >= 2 ? 0.65 : 1); // plus de zombies aux chapitres 2 et 4
+    if (zombiesForet.length - bossRestants() < (chapitre >= 2 ? 7 : 5)) apparaitreZombieForet();
+  }
+  const hx = heroForet.x;
+  const hy = heroForet.y;
+  zombiesForet.forEach(function (z) {
+    const dx = hx - z.x;
+    const dy = hy - z.y;
+    const d = Math.hypot(dx, dy) || 1;
+    z.marche = temps_zf();
+    if (z.boss && !z.reveille) { // un boss dort tant que le héros est loin
+      if (d < 450) z.reveille = true;
+      return;
+    }
+    if (z.kraken) { // le kraken invoque un mini kraken de temps en temps (5 au maximum)
+      z.invoqueDans--;
+      const minis = zombiesForet.filter(function (m) { return m.mini; }).length;
+      if (z.invoqueDans <= 0 && minis < 5) {
+        z.invoqueDans = 150;
+        zombiesForet.push({ x: z.x + (Math.random() * 60 - 30), y: z.y + 30, pv: 2, mini: true, marche: 0 });
+      }
+    }
+    const vitesse = z.mini ? 1.4 : z.boss ? 0.7 : 1;
+    const nx = z.x + (dx / d) * vitesse;
+    if (!bloqueParArbre(nx + 15, z.y + 50)) z.x = nx;
+    const ny = z.y + (dy / d) * vitesse;
+    if (!bloqueParArbre(z.x + 15, ny + 50)) z.y = ny;
+    if (d < (z.kraken ? 80 : z.boss ? 50 : 28) && degatsPauseForet <= 0) { // le zombie touche le héros
+      vieForet -= z.boss ? 4 : 2;
+      degatsPauseForet = 45;
+      flashForet = 10;
+    }
+  });
+  if (degatsPauseForet > 0) degatsPauseForet--;
+  if (flashForet > 0) flashForet--;
+  ballesForet.forEach(function (b) {
+    b.x += b.dx;
+    b.y += b.dy;
+    b.vie--;
+    zombiesForet.forEach(function (z) {
+      const grandeur = z.kraken ? 2.6 : z.boss ? 1.8 : 1;
+      if (b.vie > 0 && Math.abs(b.x - (z.x + 15)) < 18 * grandeur && Math.abs(b.y - (z.y + 25)) < 28 * grandeur) {
+        z.pv--;
+        b.vie = 0;
+      }
+    });
+  });
+  ballesForet = ballesForet.filter(function (b) { return b.vie > 0; });
+  zombiesForet.forEach(function (z) {
+    if (z.boss && z.pv <= 0) {
+      messageForet = z.nom + " est vaincu !" + (bossRestants() === 1 ? " La porte de la maison s'ouvre !" : "");
+      messageForetTemps = 240;
+    }
+  });
+  zombiesForet = zombiesForet.filter(function (z) { return z.pv > 0; });
+  if (vieForet <= 0) { // le héros est vaincu : il revient au départ
+    vieForet = 20;
+    zombiesForet = [];
+    creerBossForet();
+    ballesForet = [];
+    heroForet.x = DEPART_FORET.x;
+    heroForet.y = DEPART_FORET.y;
+    messageForet = "Tu es tombé... Tu repars du début de la forêt.";
+    messageForetTemps = 180;
+  }
+}
+
+function temps_zf() { return tempsForet / 4; }
+
+function bloqueParArbre(px, py) {
+  // Les murs de la maison bloquent aussi (la porte est devant, au sud)
+  if (Math.abs(px - MAISON.x) < 88 && py > MAISON.y - 40 && py < MAISON.y + 8) return true;
+  return ARBRES.some(function (a) {
+    return Math.hypot(px - a.x, py - a.y) < a.r * 0.6 + 8;
+  });
+}
+
+function miseAJourForet() {
+  if (dansMaison) return; // dans la maison, plus rien ne bouge
+  tempsForet++;
+  // Première personne : gauche/droite tournent, haut/bas avancent et reculent
+  if (touches["ArrowLeft"]) angleForet -= 0.04;
+  if (touches["ArrowRight"]) angleForet += 0.04;
+  dirForet = { x: Math.cos(angleForet), y: Math.sin(angleForet) };
+  let avance = 0;
+  if (touches["ArrowUp"]) avance += 3;
+  if (touches["ArrowDown"]) avance -= 2;
+  const dx = dirForet.x * avance;
+  const dy = dirForet.y * avance;
+  // On teste chaque direction séparément pour pouvoir glisser le long d'un arbre
+  const nx = Math.max(0, Math.min(TAILLE_CARTE - 30, heroForet.x + dx));
+  if (!bloqueParArbre(nx + 15, heroForet.y + 50)) heroForet.x = nx;
+  const ny = Math.max(0, Math.min(TAILLE_CARTE - 50, heroForet.y + dy));
+  if (!bloqueParArbre(heroForet.x + 15, ny + 50)) heroForet.y = ny;
+  ouvrirCoffres();
+  // Devant la porte : le héros entre dans la maison
+  if (Math.hypot(heroForet.x + 15 - MAISON.x, heroForet.y + 50 - (MAISON.y + 30)) < 40) {
+    if (bossRestants() === 0) {
+      dansMaison = true;
+      return;
+    }
+    messageForet = "La porte est fermée ! Bats les boss d'abord (" + bossRestants() + " restants).";
+    messageForetTemps = 90;
+  }
+  miseAJourZombiesForet();
+  if (messageForetTemps > 0) messageForetTemps--;
+}
+
+// Vue à la première personne : on dessine chaque objet selon sa distance et son angle
+const CHAMP = Math.PI / 3; // champ de vision : 60 degrés
+const HAUT_YEUX = 30;      // hauteur des yeux du héros
+
+// Commence un chapitre où l'on marche (2 : la forêt rouge, 4 : la ville). Le héros garde ses armes.
+function commencerChapitreForet(numero, message) {
+  chapitre = numero;
+  dansMaison = false;
+  heroForet.x = DEPART_FORET.x;
+  heroForet.y = DEPART_FORET.y;
+  angleForet = -Math.PI / 2;
+  vieForet = 20;
+  zombiesForet = [];
+  creerBossForet();
+  ballesForet = [];
+  COFFRES.forEach(function (c) { c.ouvert = false; });
+  messageForet = message;
+  messageForetTemps = 240;
+  sauverHistoire();
+}
+
+// L'intérieur de la maison : le héros retrouve sa famille
+function dessinerMaison() {
+  const L = canvas.width;
+  ctx.fillStyle = "#5a3a22"; // mur
+  ctx.fillRect(0, 0, L, 380);
+  ctx.fillStyle = "#3a2414"; // plancher
+  ctx.fillRect(0, 380, L, 220);
+  ctx.fillStyle = "#2a8fbd"; // fenêtre avec la lune
+  ctx.fillRect(190, 70, 120, 110);
+  ctx.fillStyle = "#e8e8f0";
+  ctx.beginPath();
+  ctx.arc(250, 120, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3a2414";
+  ctx.fillRect(247, 70, 6, 110);
+  ctx.fillRect(190, 122, 120, 6);
+  ctx.fillStyle = "#ff9a2a"; // bougies
+  ctx.fillRect(60, 300, 8, 30);
+  ctx.fillRect(432, 300, 8, 30);
+  ctx.beginPath();
+  ctx.arc(64, 292, 7, 0, Math.PI * 2);
+  ctx.arc(436, 292, 7, 0, Math.PI * 2);
+  ctx.fill();
+  // La famille : papa, maman et le petit frère, qui sourient
+  const famille = [
+    { x: 150, corps: "#2a5a9a", haut: 90 },
+    { x: 250, corps: "#b03a5a", haut: 85 },
+    { x: 340, corps: "#3a9a5a", haut: 55 }
+  ];
+  famille.forEach(function (p) {
+    const pied = 440;
+    ctx.fillStyle = "#333"; // jambes
+    ctx.fillRect(p.x - 10, pied - p.haut * 0.35, 20, p.haut * 0.35);
+    ctx.fillStyle = p.corps;
+    ctx.fillRect(p.x - 14, pied - p.haut * 0.75, 28, p.haut * 0.42);
+    ctx.fillStyle = "#f5c9a0"; // tête
+    ctx.beginPath();
+    ctx.arc(p.x, pied - p.haut * 0.85, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#000"; // yeux et sourire
+    ctx.fillRect(p.x - 6, pied - p.haut * 0.88, 3, 3);
+    ctx.fillRect(p.x + 3, pied - p.haut * 0.88, 3, 3);
+    ctx.beginPath();
+    ctx.arc(p.x, pied - p.haut * 0.83, 5, 0, Math.PI);
+    ctx.stroke();
+    ctx.fillStyle = "#ff4060"; // cœur
+    ctx.font = "20px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("♥", p.x, pied - p.haut - 12);
+  });
+  ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+  ctx.fillRect(30, 480, L - 60, 90);
+  ctx.fillStyle = "#ffd400";
+  ctx.font = "22px Arial";
+  ctx.fillText(chapitre === 1 ? "Tu as retrouvé ta famille !" : chapitre === 2 ? "Bravo, les boss sont vaincus !" : chapitre === 4 ? "Un message radio !" : "FIN : tu as sauvé le monde !", L / 2, 515);
+  ctx.fillStyle = "#fff";
+  ctx.font = "15px Arial";
+  if (chapitre === 5) {
+    ctx.fillText("Le Docteur Zombie est vaincu : plus aucun zombie, ta famille est libre.", L / 2, 540);
+    ctx.fillText("Merci d'avoir joué ! Échap : retour au menu", L / 2, 560);
+  } else if (chapitre === 4) {
+    ctx.fillText("« Le Docteur Zombie se cache au laboratoire. Arrête-le ! »", L / 2, 540);
+    ctx.fillText("Entrée : chapitre 5 | Échap : menu", L / 2, 560);
+  } else if (chapitre === 1) {
+    ctx.fillText("Mais un brouillard rouge se lève dehors...", L / 2, 540);
+    ctx.fillText("Entrée : chapitre 2 | Échap : menu", L / 2, 560);
+  } else {
+    ctx.fillText("Mais la route vers la ville est pleine de zombies...", L / 2, 540);
+    ctx.fillText("Entrée : chapitre 3 | Échap : menu", L / 2, 560);
+  }
+}
+
+// Des étoiles placées au hasard dans le ciel (toujours les mêmes pendant la partie), qui brillent doucement
+const ETOILES = [];
+for (let i = 0; i < 70; i++) {
+  ETOILES.push({ x: Math.random(), y: Math.random(), taille: 1 + Math.random() * 2, phase: Math.random() * 6 });
+}
+
+function dessinerEtoiles(L, horizon, decalage) {
+  ETOILES.forEach(function (e) {
+    const x = (((e.x * L - decalage) % L) + L) % L; // elles défilent quand on tourne la tête
+    ctx.globalAlpha = 0.5 + Math.sin(tempsForet / 20 + e.phase) * 0.4;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(x, e.y * (horizon - 20), e.taille, e.taille);
+  });
+  ctx.globalAlpha = 1;
+}
+
+// Une arme vue de derrière, tenue par le héros : un dessin différent pour chaque arme
+function pistoletForet(x, bas) {
+  ctx.fillStyle = "#6b4a2b"; // crosse en bois
+  ctx.fillRect(x - 9, bas - 50, 18, 50);
+  ctx.fillStyle = "#8a8a94"; // culasse
+  ctx.fillRect(x - 11, bas - 110, 22, 62);
+  ctx.fillStyle = "#c8c8d0"; // reflet sur le dessus
+  ctx.fillRect(x - 11, bas - 110, 6, 62);
+  ctx.fillStyle = "#222"; // bouche du canon
+  ctx.fillRect(x - 5, bas - 118, 10, 10);
+  ctx.fillStyle = "#f5c9a0"; // main
+  ctx.fillRect(x - 13, bas - 30, 26, 30);
+}
+
+function dessinerArmeForet(L, H, niveau) {
+  const x = L / 2 + 70;
+  const bas = H;
+  if (niveau === 0) { // Pistolet
+    pistoletForet(x, bas);
+  } else if (niveau === 1) { // Double pistolet : un dans chaque main
+    pistoletForet(L / 2 - 70, bas);
+    pistoletForet(L / 2 + 70, bas);
+  } else if (niveau === 2) { // AK-47 : crosse en bois, chargeur courbe, long canon
+    ctx.fillStyle = "#7a4a22"; // crosse
+    ctx.fillRect(x - 12, bas - 70, 24, 70);
+    ctx.fillStyle = "#3a3a3a"; // corps métal
+    ctx.fillRect(x - 14, bas - 150, 28, 85);
+    ctx.fillStyle = "#222"; // chargeur courbe
+    ctx.fillRect(x + 12, bas - 120, 12, 40);
+    ctx.fillRect(x + 18, bas - 85, 12, 25);
+    ctx.fillStyle = "#7a4a22"; // garde-main en bois
+    ctx.fillRect(x - 10, bas - 200, 20, 55);
+    ctx.fillStyle = "#555"; // long canon
+    ctx.fillRect(x - 4, bas - 235, 8, 40);
+    ctx.fillStyle = "#222"; // guidon
+    ctx.fillRect(x - 6, bas - 245, 12, 10);
+    ctx.fillStyle = "#f5c9a0"; // main
+    ctx.fillRect(x - 14, bas - 40, 28, 30);
+  } else { // Mitraillette : noire et orange, avec un gros chargeur rond
+    ctx.fillStyle = "#1a1a1e"; // corps
+    ctx.fillRect(x - 18, bas - 170, 36, 130);
+    ctx.fillStyle = "#f08a24"; // bandes orange
+    ctx.fillRect(x - 18, bas - 150, 36, 8);
+    ctx.fillRect(x - 18, bas - 100, 36, 8);
+    ctx.fillStyle = "#333"; // chargeur rond
+    ctx.beginPath();
+    ctx.arc(x + 34, bas - 90, 24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#f08a24";
+    ctx.beginPath();
+    ctx.arc(x + 34, bas - 90, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#444"; // canon avec trous de refroidissement
+    ctx.fillRect(x - 8, bas - 215, 16, 50);
+    ctx.fillStyle = "#111";
+    ctx.fillRect(x - 4, bas - 205, 8, 4);
+    ctx.fillRect(x - 4, bas - 193, 8, 4);
+    ctx.fillRect(x - 4, bas - 181, 8, 4);
+    ctx.fillStyle = "#f5c9a0"; // main
+    ctx.fillRect(x - 16, bas - 50, 32, 30);
+  }
+}
+
+function dessinerForet() {
+  if (dansMaison) {
+    dessinerMaison();
+    return;
+  }
+  const L = canvas.width;
+  const H = canvas.height;
+  const horizon = H / 2;
+  const f = (L / 2) / Math.tan(CHAMP / 2); // taille à l'écran d'un objet à la distance 1
+  ctx.globalAlpha = 1;
+  const ciel = ctx.createLinearGradient(0, 0, 0, horizon);
+  ciel.addColorStop(0, chapitre === 1 ? "#03040c" : chapitre === 2 ? "#1a0408" : chapitre === 5 ? "#04100c" : "#080c14");
+  ciel.addColorStop(1, chapitre === 1 ? "#141a30" : chapitre === 2 ? "#4a1020" : chapitre === 5 ? "#0c4a3a" : "#2a3446");
+  ctx.fillStyle = ciel;
+  ctx.fillRect(0, 0, L, horizon);
+  dessinerEtoiles(L, horizon, angleForet * 250);
+  ctx.fillStyle = chapitre === 1 ? "#e8e8f0" : "#d04040"; // la lune (rouge au chapitre 2)
+  ctx.beginPath();
+  // La lune reste à sa place dans le ciel : elle défile comme les étoiles quand on tourne la tête
+  ctx.arc((((420 - angleForet * 250) % L) + L) % L, 90, 22, 0, Math.PI * 2);
+  ctx.fill();
+  const sol = ctx.createLinearGradient(0, horizon, 0, H);
+  sol.addColorStop(0, chapitre === 1 ? "#0c1a10" : chapitre === 2 ? "#1a0c0c" : chapitre === 5 ? "#102220" : "#14161c");
+  sol.addColorStop(1, chapitre === 1 ? "#1f4026" : chapitre === 2 ? "#3a1a1a" : chapitre === 5 ? "#2e5450" : "#30333c");
+  ctx.fillStyle = sol;
+  ctx.fillRect(0, horizon, L, H - horizon);
+
+  const cx = heroForet.x + 15;
+  const cy = heroForet.y + 50;
+  const fx = Math.cos(angleForet);
+  const fy = Math.sin(angleForet);
+  // Liste de tout ce qu'il y a devant nous : arbres, coffres, zombies, balles
+  const objets = [];
+  function ajouter(type, o, ox, oy) {
+    const vx = ox - cx;
+    const vy = oy - cy;
+    const dist = vx * fx + vy * fy;          // distance devant nous
+    const cote = -vx * fy + vy * fx;         // décalage vers la droite
+    if (dist < 12 || dist > 900) return;
+    if (Math.abs(cote / dist) > Math.tan(CHAMP / 2) + 0.4) return; // hors de l'écran
+    objets.push({ type: type, o: o, dist: dist, sx: L / 2 + (cote / dist) * f, s: f / dist });
+  }
+  ajouter("maison", MAISON, MAISON.x, MAISON.y);
+  ARBRES.forEach(function (a) { ajouter("arbre", a, a.x, a.y); });
+  COFFRES.forEach(function (c) { ajouter("coffre", c, c.x, c.y); });
+  zombiesForet.forEach(function (z) { ajouter(z.kraken || z.mini ? "kraken" : "zombie", z, z.x + 15, z.y + 50); });
+  ballesForet.forEach(function (b) { ajouter("balle", b, b.x, b.y); });
+  objets.sort(function (a, b) { return b.dist - a.dist; }); // les plus loin d'abord
+
+  objets.forEach(function (ob) {
+    let s = ob.s;
+    const pied = horizon + HAUT_YEUX * s; // où l'objet touche le sol à l'écran
+    ctx.globalAlpha = Math.max(0.05, Math.min(1, 1.2 - ob.dist / 800)); // brouillard
+    if (ob.type === "maison") {
+      ctx.fillStyle = "#6a4a30"; // murs
+      ctx.fillRect(ob.sx - 80 * s, pied - 90 * s, 160 * s, 90 * s);
+      ctx.fillStyle = "#3a1a14"; // toit
+      ctx.beginPath();
+      ctx.moveTo(ob.sx - 95 * s, pied - 90 * s);
+      ctx.lineTo(ob.sx, pied - 150 * s);
+      ctx.lineTo(ob.sx + 95 * s, pied - 90 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#ffb84a"; // fenêtres allumées
+      ctx.fillRect(ob.sx - 62 * s, pied - 65 * s, 28 * s, 28 * s);
+      ctx.fillRect(ob.sx + 34 * s, pied - 65 * s, 28 * s, 28 * s);
+      ctx.fillStyle = "#2a1408"; // porte
+      ctx.fillRect(ob.sx - 14 * s, pied - 50 * s, 28 * s, 50 * s);
+      ctx.fillStyle = "#ffd400";
+      ctx.fillRect(ob.sx + 7 * s, pied - 26 * s, 4 * s, 4 * s);
+    } else if (ob.type === "arbre" && chapitre === 5) { // au laboratoire : des tubes de verre qui brillent
+      const r = ob.o.r;
+      const hauteur = 110 + r * 3;
+      ctx.fillStyle = "#3a4a4a"; // socle
+      ctx.fillRect(ob.sx - 22 * s, pied - 12 * s, 44 * s, 12 * s);
+      ctx.fillStyle = "rgba(60, 255, 176, 0.55)"; // tube lumineux
+      ctx.fillRect(ob.sx - 16 * s, pied - hauteur * s, 32 * s, (hauteur - 12) * s);
+      ctx.fillStyle = "rgba(200, 255, 230, 0.7)"; // reflet
+      ctx.fillRect(ob.sx - 10 * s, pied - (hauteur - 10) * s, 5 * s, (hauteur - 30) * s);
+      ctx.fillStyle = "#3a4a4a"; // couvercle
+      ctx.fillRect(ob.sx - 22 * s, pied - (hauteur + 8) * s, 44 * s, 10 * s);
+    } else if (ob.type === "arbre" && chapitre === 4) { // dans la ville, ce sont des immeubles
+      const r = ob.o.r;
+      const largeur = r * 2.6;
+      const hauteur = 90 + r * 5;
+      ctx.fillStyle = "#2a2e3a";
+      ctx.fillRect(ob.sx - largeur / 2 * s, pied - hauteur * s, largeur * s, hauteur * s);
+      ctx.fillStyle = "#1c2028"; // toit
+      ctx.fillRect(ob.sx - largeur / 2 * s, pied - hauteur * s, largeur * s, 6 * s);
+      for (let ligne = 0; ligne < 4; ligne++) { // fenêtres, certaines allumées
+        for (let col = 0; col < 3; col++) {
+          const allumee = (Math.floor(ob.o.x) + ligne * 3 + col) % 3 === 0;
+          ctx.fillStyle = allumee ? "#ffd070" : "#14161c";
+          ctx.fillRect(ob.sx - largeur / 2 * s + (6 + col * (largeur / 3)) * s, pied - (hauteur - 14 - ligne * 28) * s, 10 * s, 14 * s);
+        }
+      }
+    } else if (ob.type === "arbre") {
+      const r = ob.o.r;
+      ctx.fillStyle = "#4a2e18"; // tronc
+      ctx.fillRect(ob.sx - 6 * s, pied - 45 * s, 12 * s, 45 * s);
+      ctx.fillStyle = "#17401f"; // feuilles
+      ctx.beginPath();
+      ctx.arc(ob.sx, pied - (45 + r * 0.8) * s, r * 1.5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#1f5a2b";
+      ctx.beginPath();
+      ctx.arc(ob.sx - r * 0.4 * s, pied - (50 + r) * s, r * 0.9 * s, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (ob.type === "kraken") { // le kraken géant ou un mini kraken, vus de face
+      const z = ob.o;
+      const u = s * (z.kraken ? 2.6 : 0.8);
+      ctx.lineCap = "round";
+      ctx.lineWidth = 7 * u;
+      ctx.strokeStyle = z.kraken ? "#5a2a8a" : "#a05ad0";
+      for (let i = 0; i < 5; i++) { // tentacules qui ondulent
+        const x0 = ob.sx + (i - 2) * 11 * u;
+        ctx.beginPath();
+        ctx.moveTo(x0, pied - 45 * u);
+        ctx.quadraticCurveTo(x0 + Math.sin(tempsForet / 6 + i) * 9 * u, pied - 22 * u, x0 + Math.sin(tempsForet / 5 + i * 2) * 8 * u, pied);
+        ctx.stroke();
+      }
+      ctx.fillStyle = z.kraken ? "#5a2a8a" : "#b878e0"; // tête
+      ctx.beginPath();
+      ctx.ellipse(ob.sx, pied - 68 * u, 32 * u, 28 * u, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff"; // yeux
+      ctx.beginPath();
+      ctx.arc(ob.sx - 12 * u, pied - 66 * u, 8 * u, 0, Math.PI * 2);
+      ctx.arc(ob.sx + 12 * u, pied - 66 * u, 8 * u, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = z.kraken ? "#e22" : "#111";
+      ctx.beginPath();
+      ctx.arc(ob.sx - 12 * u, pied - 64 * u, 4 * u, 0, Math.PI * 2);
+      ctx.arc(ob.sx + 12 * u, pied - 64 * u, 4 * u, 0, Math.PI * 2);
+      ctx.fill();
+      if (z.kraken) { // barre de vie du kraken
+        ctx.fillStyle = "#222";
+        ctx.fillRect(ob.sx - 40, pied - 105 * u, 80, 6);
+        ctx.fillStyle = "#e33";
+        ctx.fillRect(ob.sx - 40, pied - 105 * u, 80 * Math.max(0, z.pv) / z.pvMax, 6);
+      }
+    } else if (ob.type === "coffre") {
+      const c = ob.o;
+      ctx.fillStyle = c.ouvert ? "#4a3018" : "#8b5a2b"; // caisse
+      ctx.fillRect(ob.sx - 18 * s, pied - 20 * s, 36 * s, 20 * s);
+      if (c.ouvert) {
+        ctx.fillStyle = "#2a1a0c"; // couvercle levé
+        ctx.fillRect(ob.sx - 18 * s, pied - 38 * s, 36 * s, 8 * s);
+      } else {
+        ctx.fillStyle = "#a06a30"; // couvercle fermé
+        ctx.fillRect(ob.sx - 18 * s, pied - 30 * s, 36 * s, 12 * s);
+        ctx.fillStyle = "#ffd400"; // serrure et bandes dorées
+        ctx.fillRect(ob.sx - 4 * s, pied - 24 * s, 8 * s, 8 * s);
+        ctx.fillRect(ob.sx - 18 * s, pied - 30 * s, 4 * s, 30 * s);
+        ctx.fillRect(ob.sx + 14 * s, pied - 30 * s, 4 * s, 30 * s);
+      }
+    } else if (ob.type === "zombie") {
+      const z = ob.o;
+      const s0 = s;
+      if (z.boss) { // un boss est presque deux fois plus grand
+        s = s0 * 1.8;
+        ctx.fillStyle = "#222"; // barre de vie au-dessus de sa tête
+        ctx.fillRect(ob.sx - 30, pied - 125 * s, 60, 6);
+        ctx.fillStyle = "#e33";
+        ctx.fillRect(ob.sx - 30, pied - 125 * s, 60 * Math.max(0, z.pv) / z.pvMax, 6);
+      }
+      // Animation : les jambes se lèvent chacune leur tour, les bras tendus montent et descendent
+      const pas = Math.sin(z.marche * 2 + z.x * 0.1);
+      const bob = Math.abs(pas) * 3 * s; // le corps monte et descend en marchant
+      const ville = chapitre === 4 || chapitre === 5; // en ville et au labo : combinaison orange
+      ctx.fillStyle = ville ? "#c86a10" : "#3a4a5a"; // jambes
+      ctx.fillRect(ob.sx - 11 * s, pied - 22 * s - Math.max(0, pas) * 7 * s, 9 * s, 22 * s);
+      ctx.fillRect(ob.sx + 2 * s, pied - 22 * s - Math.max(0, -pas) * 7 * s, 9 * s, 22 * s);
+      ctx.fillStyle = z.boss ? z.couleur : ville ? "#e07a14" : "#5a8a3a"; // corps
+      ctx.fillRect(ob.sx - 14 * s, pied - 48 * s - bob, 28 * s, 28 * s);
+      ctx.fillRect(ob.sx - 26 * s, pied - 46 * s - bob - pas * 6 * s, 12 * s, 6 * s); // bras tendus
+      ctx.fillRect(ob.sx + 14 * s, pied - 46 * s - bob + pas * 6 * s, 12 * s, 6 * s);
+      ctx.fillStyle = ville ? "#9aa0a8" : "#8fd16a"; // tête
+      ctx.beginPath();
+      ctx.arc(ob.sx + pas * 2 * s, pied - 58 * s - bob, 11 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#c00"; // yeux
+      ctx.fillRect(ob.sx - 6 * s + pas * 2 * s, pied - 61 * s - bob, 4 * s, 4 * s);
+      ctx.fillRect(ob.sx + 2 * s + pas * 2 * s, pied - 61 * s - bob, 4 * s, 4 * s);
+    } else {
+      ctx.fillStyle = "#ff4040"; // balle
+      ctx.beginPath();
+      ctx.arc(ob.sx, horizon + (HAUT_YEUX - 30) * s, Math.max(2, 4 * s), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+  ctx.globalAlpha = 1;
+  dessinerArmeForet(L, H, niveauArme); // l'arme du héros en bas de l'écran
+  ctx.strokeStyle = "#fff"; // viseur
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(L / 2 - 10, horizon); ctx.lineTo(L / 2 + 10, horizon);
+  ctx.moveTo(L / 2, horizon - 10); ctx.lineTo(L / 2, horizon + 10);
+  ctx.stroke();
+  if (flashForet > 0) {
+    ctx.fillStyle = "rgba(255, 0, 0, " + flashForet * 0.04 + ")"; // écran rouge quand on est touché
+    ctx.fillRect(0, 0, L, H);
+  }
+  // Inventaire : une case par arme, la case dorée est l'arme en main
+  ARMES.forEach(function (a, i) {
+    const x = L / 2 - 2 * 62 + i * 62 + 3;
+    const aEnMain = i === niveauArme;
+    const possedee = armesPossedees.indexOf(i) >= 0;
+    ctx.fillStyle = possedee ? "rgba(0, 0, 0, 0.65)" : "rgba(0, 0, 0, 0.3)";
+    ctx.fillRect(x, 535, 56, 36);
+    ctx.strokeStyle = aEnMain ? "#ffd400" : "#888";
+    ctx.lineWidth = aEnMain ? 3 : 1;
+    ctx.strokeRect(x, 535, 56, 36);
+    ctx.fillStyle = possedee ? "#fff" : "#666";
+    ctx.font = "11px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText((i + 1) + " " + (possedee ? a.nom.slice(0, 8) : "vide"), x + 28, 557);
+  });
+  ctx.fillStyle = "#fff";
+  ctx.font = "14px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("← → : tourner | ↑ ↓ : avancer, reculer | Espace : tirer | Échap : menu", canvas.width / 2, 590);
+  const ouverts = COFFRES.filter(function (c) { return c.ouvert; }).length;
+  ctx.fillText("Coffres : " + ouverts + "/" + COFFRES.length + " | Arme : " + ARMES[niveauArme].nom + " | Vie : " + vieForet, canvas.width / 2, 20);
+  if (messageForetTemps > 0) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.fillRect(40, 50, canvas.width - 80, 34);
+    ctx.fillStyle = "#ffd400";
+    ctx.font = "16px Arial";
+    ctx.fillText(messageForet, canvas.width / 2, 72);
+  }
+}
+
+// Progression du mode histoire : le chapitre et les armes sont gardés dans le navigateur
+function sauverHistoire() {
+  try {
+    localStorage.setItem("histoireZombies", JSON.stringify({ chapitre: chapitre, armes: armesPossedees, arme: niveauArme }));
+  } catch (e) {}
+}
+
+function chargerHistoire() {
+  try {
+    const s = JSON.parse(localStorage.getItem("histoireZombies"));
+    if (s && s.chapitre >= 1 && s.chapitre <= 5 && Array.isArray(s.armes)) return s;
+  } catch (e) {}
+  return null;
+}
+
+function montrerBoutonContinuer() {
+  const s = chargerHistoire();
+  const bouton = document.getElementById("continuerHistoire");
+  bouton.style.display = s ? "block" : "none";
+  if (s) bouton.textContent = "Continuer (chapitre " + s.chapitre + ")";
+}
+
+document.getElementById("boutonHistoire").addEventListener("click", montrerBoutonContinuer);
+
+document.getElementById("continuerHistoire").addEventListener("click", function () {
+  const s = chargerHistoire();
+  lancerHistoire();
+  if (!s) return;
+  armesPossedees = s.armes;
+  niveauArme = s.arme;
+  if (s.chapitre === 3) demarrerRoute();
+  else if (s.chapitre > 1) commencerChapitreForet(s.chapitre, "Ta partie est reprise : chapitre " + s.chapitre);
+  sauverHistoire();
+});
+
+document.getElementById("commencerHistoire").addEventListener("click", function () {
+  lancerHistoire();
+  sauverHistoire(); // nouvelle partie : on repart du chapitre 1
+});
+
+function lancerHistoire() {
+  modeHistoire = true;
+  heroForet.x = DEPART_FORET.x;
+  heroForet.y = DEPART_FORET.y;
+  niveauArme = 0;
+  armesPossedees = [0];
+  chapitre = 1;
+  angleForet = -Math.PI / 2;
+  dansMaison = false;
+  vieForet = 20;
+  zombiesForet = [];
+  creerBossForet();
+  ballesForet = [];
+  prochainZombieForet = 300;
+  COFFRES.forEach(function (c) { c.ouvert = false; });
+  messageForetTemps = 0;
+  accueil.style.display = "none";
+  initAudio();
+}
+
+document.addEventListener("keydown", function (e) {
+  if (!modeHistoire) return;
+  if (e.code.indexOf("Arrow") === 0) e.preventDefault();
+  if (e.code === "Space" && !e.repeat && !pauseHistoire && chapitre === 3) tirerRoute();
+  else if (e.code === "Space" && !e.repeat && !pauseHistoire && !dansMaison) tirerForet();
+  if (e.code === "Enter" && dansMaison && chapitre === 2) demarrerRoute(); // la suite : chapitre 3
+  // Inventaire : les touches 1 à 4 choisissent l'arme
+  const numero = e.code.indexOf("Digit") === 0 ? Number(e.code.slice(5)) - 1 : -1;
+  if (numero >= 0 && armesPossedees.indexOf(numero) >= 0) niveauArme = numero;
+  if (e.code === "Enter" && dansMaison && chapitre === 1) {
+    commencerChapitreForet(2, "Chapitre 2 : bats les 2 nouveaux boss et retourne à la maison !");
+  }
+  if (e.code === "Enter" && dansMaison && chapitre === 4) {
+    commencerChapitreForet(5, "Chapitre 5 : le laboratoire ! Bats les 4 boss, dont le Kraken géant.");
+  }
+  if (e.code === "Enter" && chapitre === 3 && route.fini) {
+    commencerChapitreForet(4, "Chapitre 4 : la ville ! Bats les 3 boss pour atteindre l'abri.");
+  }
+  if (e.code === "Escape") {
+    modeHistoire = false;
+    retourMenu();
+  }
+});
+
+// ----- Chapitre 3 : on conduit une voiture sur la route et on tire sur les zombies -----
+const ZOMBIES_A_TUER = 15;
+const route = { x: 0, volant: 0, distance: 0, zombies: [], vie: 20, tues: 0, tir: null, flash: 0, prochain: 60, fini: false, message: "", messageTemps: 0 };
+
+function demarrerRoute() {
+  chapitre = 3;
+  dansMaison = false;
+  route.x = 0;
+  route.volant = 0;
+  route.distance = 0;
+  route.zombies = [];
+  route.vie = 20;
+  route.tues = 0;
+  route.tir = null;
+  route.flash = 0;
+  route.prochain = 60;
+  route.fini = false;
+  route.message = "Chapitre 3 : la route ! Conduis avec ← → et tire avec Espace.";
+  route.messageTemps = 240;
+  sauverHistoire();
+}
+
+// Perspective : p vaut 1 tout près de nous et presque 0 à l'horizon
+function projeter(x, z) {
+  const L = canvas.width;
+  const H = canvas.height;
+  const horizon = H * 0.42;
+  const p = 60 / (z + 60);
+  return { p: p, sx: L / 2 + (x - route.x) * 300 * p, sy: horizon + (H * 0.8 - horizon) * p };
+}
+
+function miseAJourRoute() {
+  if (route.fini) return;
+  tempsForet++;
+  // Le volant tourne doucement vers ce qu'on demande, la voiture suit le volant
+  const cible = (touches["ArrowRight"] ? 1 : 0) - (touches["ArrowLeft"] ? 1 : 0);
+  route.volant += (cible - route.volant) * 0.12;
+  route.x = Math.max(-1, Math.min(1, route.x + route.volant * 0.025));
+  route.distance += 5;
+  route.prochain--;
+  if (route.prochain <= 0) {
+    route.prochain = 40 + Math.random() * 50;
+    route.zombies.push({ x: (Math.random() * 1.6 - 0.8), z: 1100, pv: 2, phase: Math.random() * 6 });
+  }
+  route.zombies.forEach(function (zo) {
+    zo.z -= 5 + 1.2; // la voiture avance et le zombie vient vers nous
+    zo.x += Math.sign(route.x - zo.x) * 0.002;
+  });
+  route.zombies = route.zombies.filter(function (zo) {
+    if (zo.pv <= 0) return false;
+    if (zo.z > 20) return true;
+    if (Math.abs(zo.x - route.x) < 0.16) { // il se jette sur la voiture
+      route.vie -= 3;
+      route.flash = 10;
+    }
+    return false;
+  });
+  if (route.flash > 0) route.flash--;
+  if (route.messageTemps > 0) route.messageTemps--;
+  if (route.tir) { route.tir.t--; if (route.tir.t <= 0) route.tir = null; }
+  if (route.vie <= 0) { // la voiture est abîmée : on recommence la route
+    demarrerRoute();
+    route.message = "La voiture est abîmée ! On recommence la route.";
+  }
+  if (route.tues >= ZOMBIES_A_TUER) route.fini = true;
+}
+
+function tirerRoute() {
+  if (route.fini) return;
+  let cible = null;
+  route.zombies.forEach(function (zo) { // le zombie le plus proche, aligné avec la voiture
+    if (zo.pv > 0 && Math.abs(zo.x - route.x) < 0.2 && (!cible || zo.z < cible.z)) cible = zo;
+  });
+  const bouche = { sx: canvas.width / 2 + 100, sy: canvas.height - 150 };
+  if (cible) {
+    const pr = projeter(cible.x, cible.z);
+    route.tir = { x: pr.sx, y: pr.sy - 60 * pr.p, bx: bouche.sx, by: bouche.sy, t: 6 };
+    cible.pv -= ARMES[niveauArme].balles > 1 ? 2 : 1;
+    if (cible.pv <= 0) route.tues++;
+  } else {
+    route.tir = { x: canvas.width / 2, y: canvas.height * 0.42, bx: bouche.sx, by: bouche.sy, t: 6 };
+  }
+}
+
+// Les zombies de la route : combinaison orange, peau grise et yeux jaunes qui brillent
+function dessinerZombieRoute(zo) {
+  const pr = projeter(zo.x, zo.z);
+  const s = pr.p * 150; // taille à l'écran
+  const pas = Math.sin(tempsForet / 4 + zo.phase);
+  const bob = Math.abs(pas) * 0.03 * s;
+  const x = pr.sx;
+  const pied = pr.sy;
+  ctx.globalAlpha = Math.max(0.15, Math.min(1, 1.3 - zo.z / 1100));
+  ctx.fillStyle = "#5a3a10"; // bottes
+  ctx.fillRect(x - 0.17 * s, pied - 0.1 * s - Math.max(0, pas) * 0.08 * s, 0.14 * s, 0.1 * s);
+  ctx.fillRect(x + 0.03 * s, pied - 0.1 * s - Math.max(0, -pas) * 0.08 * s, 0.14 * s, 0.1 * s);
+  ctx.fillStyle = "#c86a10"; // jambes de la combinaison
+  ctx.fillRect(x - 0.15 * s, pied - 0.4 * s - Math.max(0, pas) * 0.08 * s, 0.12 * s, 0.32 * s);
+  ctx.fillRect(x + 0.03 * s, pied - 0.4 * s - Math.max(0, -pas) * 0.08 * s, 0.12 * s, 0.32 * s);
+  ctx.fillStyle = "#e07a14"; // corps orange
+  ctx.fillRect(x - 0.2 * s, pied - 0.8 * s - bob, 0.4 * s, 0.42 * s);
+  ctx.fillStyle = "#ffd400"; // bande réfléchissante
+  ctx.fillRect(x - 0.2 * s, pied - 0.62 * s - bob, 0.4 * s, 0.05 * s);
+  ctx.fillStyle = "#c86a10"; // bras qui pendent et se balancent
+  ctx.fillRect(x - 0.3 * s, pied - 0.78 * s - bob + pas * 0.06 * s, 0.1 * s, 0.38 * s);
+  ctx.fillRect(x + 0.2 * s, pied - 0.78 * s - bob - pas * 0.06 * s, 0.1 * s, 0.38 * s);
+  ctx.fillStyle = "#9aa0a8"; // tête grise un peu penchée
+  ctx.beginPath();
+  ctx.arc(x + pas * 0.02 * s, pied - 0.92 * s - bob, 0.14 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffe040"; // yeux jaunes brillants
+  ctx.shadowColor = "#ffe040";
+  ctx.shadowBlur = 8;
+  ctx.fillRect(x - 0.08 * s + pas * 0.02 * s, pied - 0.95 * s - bob, 0.05 * s, 0.04 * s);
+  ctx.fillRect(x + 0.03 * s + pas * 0.02 * s, pied - 0.95 * s - bob, 0.05 * s, 0.04 * s);
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+function dessinerRoute() {
+  const L = canvas.width;
+  const H = canvas.height;
+  const horizon = H * 0.42;
+  const ciel = ctx.createLinearGradient(0, 0, 0, horizon);
+  ciel.addColorStop(0, "#0a0614");
+  ciel.addColorStop(1, "#5a2a3a");
+  ctx.fillStyle = ciel;
+  ctx.fillRect(0, 0, L, horizon);
+  dessinerEtoiles(L, horizon, 0);
+  ctx.fillStyle = "#14201a"; // champs sombres de chaque côté
+  ctx.fillRect(0, horizon, L, H - horizon);
+  // La route : plus étroite au loin
+  const loin = projeter(0, 1100);
+  const pres = projeter(0, -40);
+  ctx.fillStyle = "#2a2a30";
+  ctx.beginPath();
+  ctx.moveTo(L / 2 - (1.1 + route.x) * 300 * loin.p + 0 - 0, loin.sy);
+  ctx.lineTo(L / 2 + (1.1 - route.x) * 300 * loin.p, loin.sy);
+  ctx.lineTo(L / 2 + (1.1 - route.x) * 300 * pres.p, pres.sy);
+  ctx.lineTo(L / 2 - (1.1 + route.x) * 300 * pres.p, pres.sy);
+  ctx.closePath();
+  ctx.fill();
+  // Traits blancs au milieu et arbres sur les côtés : ils défilent pour donner la vitesse
+  const decalage = route.distance % 100;
+  for (let z = 1100 - decalage; z > -40; z -= 100) {
+    const a = projeter(0, z);
+    const b = projeter(0, z + 40);
+    ctx.fillStyle = "#e8e0c0";
+    ctx.fillRect(a.sx - 5 * a.p, b.sy, 10 * a.p, a.sy - b.sy);
+    [-1.7, 1.7].forEach(function (cote) {
+      const t = projeter(cote, z);
+      ctx.fillStyle = "#07120c";
+      ctx.beginPath();
+      ctx.moveTo(t.sx - 40 * t.p, t.sy);
+      ctx.lineTo(t.sx, t.sy - 220 * t.p);
+      ctx.lineTo(t.sx + 40 * t.p, t.sy);
+      ctx.fill();
+    });
+  }
+  // Les zombies, les plus loin d'abord
+  route.zombies.slice().sort(function (a, b) { return b.z - a.z; }).forEach(dessinerZombieRoute);
+  if (route.tir) { // trait lumineux du tir
+    ctx.strokeStyle = "#ffe040";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(route.tir.bx, route.tir.by);
+    ctx.lineTo(route.tir.x, route.tir.y);
+    ctx.stroke();
+  }
+  // L'intérieur de la voiture : tableau de bord et volant qui tourne
+  ctx.fillStyle = "#101014";
+  ctx.fillRect(0, H - 170, L, 170);
+  ctx.fillStyle = "#1c1c22";
+  ctx.fillRect(0, H - 170, L, 14);
+  ctx.fillStyle = "#101014"; // montants du pare-brise
+  ctx.fillRect(0, 0, 18, H - 170);
+  ctx.fillRect(L - 18, 0, 18, H - 170);
+  ctx.save();
+  ctx.translate(L / 2 - 60, H - 40);
+  ctx.rotate(route.volant * 0.9); // le volant réagit à nos mouvements
+  ctx.strokeStyle = "#555";
+  ctx.lineWidth = 14;
+  ctx.beginPath();
+  ctx.arc(0, 0, 80, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.moveTo(-80, 0); ctx.lineTo(80, 0);
+  ctx.moveTo(0, 0); ctx.lineTo(0, 80);
+  ctx.stroke();
+  ctx.fillStyle = "#d32f2f"; // repère rouge en haut du volant
+  ctx.fillRect(-6, -90, 12, 20);
+  ctx.fillStyle = "#333";
+  ctx.beginPath();
+  ctx.arc(0, 0, 20, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "#555"; // l'arme sort par la fenêtre
+  ctx.fillRect(L / 2 + 90, H - 150, 20, 90);
+  ctx.fillStyle = "#222";
+  ctx.fillRect(L / 2 + 94, H - 165, 12, 18);
+  if (route.flash > 0) {
+    ctx.fillStyle = "rgba(255, 0, 0, " + route.flash * 0.04 + ")";
+    ctx.fillRect(0, 0, L, H);
+  }
+  ctx.fillStyle = "#fff";
+  ctx.font = "16px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("Vie de la voiture : " + route.vie + " | Zombies : " + route.tues + "/" + ZOMBIES_A_TUER, L / 2, 24);
+  ctx.font = "14px Arial";
+  ctx.fillText("← → : conduire | Espace : tirer | Échap : menu", L / 2, H - 10);
+  if (route.messageTemps > 0 && !route.fini) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.fillRect(30, 44, L - 60, 34);
+    ctx.fillStyle = "#ffd400";
+    ctx.font = "16px Arial";
+    ctx.fillText(route.message, L / 2, 66);
+  }
+  if (route.fini) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+    ctx.fillRect(0, 0, L, H);
+    ctx.fillStyle = "#ffd400";
+    ctx.font = "30px Arial";
+    ctx.fillText("Route libre !", L / 2, 250);
+    ctx.fillStyle = "#fff";
+    ctx.font = "18px Arial";
+    ctx.fillText("Tu as vaincu tous les zombies de la route.", L / 2, 290);
+    ctx.fillText("Tu arrives aux portes de la ville...", L / 2, 320);
+    ctx.fillText("Entrée : chapitre 4 | Échap : menu", L / 2, 360);
+  }
+}
 
 function boucle() {
   boutonPause.style.display = (!enAttente && !finDuJeu && !victoire) ? "block" : "none";
-  miseAJour();
-  dessiner();
+  document.getElementById("boutonPauseHistoire").style.display = modeHistoire ? "block" : "none";
+  if (modeHistoire && chapitre === 3) {
+    if (!pauseHistoire) miseAJourRoute();
+    dessinerRoute();
+  } else if (modeHistoire) {
+    if (!pauseHistoire) miseAJourForet();
+    dessinerForet();
+  } else {
+    miseAJour();
+    dessiner();
+  }
   requestAnimationFrame(boucle);
 }
 
